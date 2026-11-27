@@ -24,6 +24,13 @@ heroku login
 heroku run --type=worker bin/hotmail-checker -selftest -a <app>
 ```
 
+**Check one cookie directly** — prints provider, verdict, identity and every field:
+
+```bash
+bin/hotmail-checker -check cookies.txt
+cat cookies.txt | bin/hotmail-checker -check -
+```
+
 ### Worker-only app
 
 There is no `web` process — the bot polls Telegram, it does not serve HTTP.

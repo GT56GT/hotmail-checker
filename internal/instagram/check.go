@@ -146,6 +146,9 @@ func judge(resp *fhttp.Response, body []byte) (v provider.Verdict, reason string
 		return provider.RateLimited, "rate limited", true
 
 	case resp.StatusCode >= 300 && resp.StatusCode < 400:
+		if sessionRevoked(resp) {
+			return provider.Dead, "session revoked by server", true
+		}
 		loc := resp.Header.Get("Location")
 		if isCheckpoint(body) || isCheckpoint([]byte(loc)) {
 			return provider.Challenged, "challenge: checkpoint required", true
@@ -156,6 +159,9 @@ func judge(resp *fhttp.Response, body []byte) (v provider.Verdict, reason string
 		return provider.Dead, "redirected to " + shorten(loc, 60), true
 
 	case resp.StatusCode == fhttp.StatusUnauthorized:
+		if sessionRevoked(resp) {
+			return provider.Dead, "session revoked by server", true
+		}
 		return provider.Dead, "session expired", true
 
 	case resp.StatusCode == fhttp.StatusForbidden:
@@ -172,6 +178,31 @@ func judge(resp *fhttp.Response, body []byte) (v provider.Verdict, reason string
 
 	// 400 / 404 / 5xx — inconclusive.
 	return provider.Failed, fmt.Sprintf("http %d", resp.StatusCode), false
+}
+
+// sessionRevoked reports whether the server explicitly cleared sessionid.
+// Instagram does this on an invalid session — a direct statement that the
+// cookie is gone, as opposed to an IP block which leaves it alone.
+func sessionRevoked(resp *fhttp.Response) bool {
+	for k, values := range resp.Header {
+		if !strings.EqualFold(k, "Set-Cookie") {
+			continue
+		}
+		for _, c := range values {
+			l := strings.ToLower(strings.TrimSpace(c))
+			if !strings.HasPrefix(l, "sessionid=") {
+				continue
+			}
+			if strings.HasPrefix(l, `sessionid=""`) ||
+				strings.HasPrefix(l, "sessionid=deleted") ||
+				strings.Contains(l, "max-age=0") ||
+				strings.Contains(l, "max-age=-") ||
+				strings.Contains(l, "1970") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // enrich adds follower counts and account flags from the profile endpoint.

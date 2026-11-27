@@ -6,9 +6,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +29,7 @@ import (
 func main() {
 	selftest := flag.Bool("selftest", false, "run one diagnostic request and exit")
 	dbcheck := flag.Bool("dbcheck", false, "verify DATABASE_URL and the schema, then exit")
+	checkPath := flag.String("check", "", "read cookies from a file (or - for stdin), check them and exit")
 	flag.Parse()
 
 	if *selftest {
@@ -35,6 +38,10 @@ func main() {
 	}
 	if *dbcheck {
 		runDBCheck()
+		return
+	}
+	if *checkPath != "" {
+		runCheck(*checkPath)
 		return
 	}
 
@@ -187,6 +194,88 @@ func orNone(s string) string {
 		return "(none)"
 	}
 	return s
+}
+
+// runCheck runs one real check against cookies in a file. Useful for verifying
+// a single account without going through the bot:
+//
+//	bin/hotmail-checker -check cookies.txt
+//	cat cookies.txt | bin/hotmail-checker -check -
+func runCheck(path string) {
+	var data []byte
+	var err error
+
+	if path == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		fmt.Printf("read: %v\n", err)
+		os.Exit(1)
+	}
+
+	timeout := 25 * time.Second
+	checkers := []provider.Checker{
+		checker.New(timeout, 1),
+		netflix.New(timeout),
+		instagram.New(timeout),
+	}
+
+	text := string(data)
+
+	var chk provider.Checker
+	for _, c := range checkers {
+		if c.Detect(text) {
+			chk = c
+			break
+		}
+	}
+	if chk == nil {
+		fmt.Println("no provider recognised these cookies")
+		os.Exit(1)
+	}
+
+	cookies, issues := chk.ParseBlock(text)
+	for _, issue := range issues {
+		fmt.Printf("issue: %v\n", issue)
+	}
+	if len(cookies) == 0 {
+		fmt.Println("no cookie sets parsed")
+		os.Exit(1)
+	}
+
+	fmt.Printf("provider: %s\n", chk.Label())
+	fmt.Printf("parsed:   %d cookie set(s)\n", len(cookies))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	for i, ck := range cookies {
+		fmt.Printf("\n--- set %d ---\n", i+1)
+		res := chk.Check(ctx, ck, "")
+
+		fmt.Printf("verdict: %s\n", res.Verdict)
+		if res.Email != "" {
+			fmt.Printf("email:   %s\n", res.Email)
+		}
+		if res.Name != "" {
+			fmt.Printf("name:    %s\n", res.Name)
+		}
+		if res.Reason != "" {
+			fmt.Printf("reason:  %s\n", res.Reason)
+		}
+		fmt.Printf("elapsed: %s\n", res.Elapsed.Round(time.Millisecond))
+
+		keys := make([]string, 0, len(res.Meta))
+		for k := range res.Meta {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Printf("  %-13s %s\n", k, res.Meta[k])
+		}
+	}
 }
 
 // runDBCheck verifies DATABASE_URL end to end: connect, migrate, query.

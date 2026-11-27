@@ -229,3 +229,52 @@ func TestJudge(t *testing.T) {
 		}
 	}
 }
+
+func TestSessionRevoked(t *testing.T) {
+	cleared := &fhttp.Response{Header: fhttp.Header{
+		"Set-Cookie": {
+			`sessionid=""; Domain=instagram.com; expires=Thu, 01-Jan-1970 00:00:00 GMT; Max-Age=0; Path=/`,
+		},
+	}}
+	if !sessionRevoked(cleared) {
+		t.Error("should detect cleared sessionid")
+	}
+
+	deleted := &fhttp.Response{Header: fhttp.Header{
+		"Set-Cookie": {
+			`sessionid=deleted; expires=Thu, 01-Jan-1970 00:00:01 GMT; path=/; domain=.instagram.com`,
+		},
+	}}
+	if !sessionRevoked(deleted) {
+		t.Error("should detect deleted sessionid")
+	}
+
+	healthy := &fhttp.Response{Header: fhttp.Header{
+		"Set-Cookie": {`csrftoken=abc; path=/`},
+	}}
+	if sessionRevoked(healthy) {
+		t.Error("false positive on unrelated cookie")
+	}
+
+	empty := &fhttp.Response{Header: fhttp.Header{}}
+	if sessionRevoked(empty) {
+		t.Error("false positive on empty headers")
+	}
+}
+
+func TestJudgeRevokedBeatsExpired(t *testing.T) {
+	resp := &fhttp.Response{
+		StatusCode: 302,
+		Header: fhttp.Header{
+			"Location":   {"https://www.instagram.com/accounts/login/?next=/x"},
+			"Set-Cookie": {`sessionid=""; Domain=instagram.com; Max-Age=0; Path=/`},
+		},
+	}
+	v, reason, final := judge(resp, nil)
+	if !final || v != provider.Dead {
+		t.Fatalf("v=%v final=%v", v, final)
+	}
+	if reason != "session revoked by server" {
+		t.Errorf("reason = %q, want the revoked label", reason)
+	}
+}
