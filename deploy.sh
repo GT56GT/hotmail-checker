@@ -13,12 +13,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-# Load local .env when present.
+# Load local .env when present. Read line by line rather than `source` so
+# values containing & or ? (Postgres URLs) survive intact.
 if [[ -f .env ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source .env
-  set +a
+  while IFS='=' read -r key value; do
+    [[ -z "$key" || "$key" == \#* ]] && continue
+    key="${key// /}"
+    value="${value%\"}"; value="${value#\"}"
+    export "$key=$value"
+  done < .env
 fi
 
 if [[ -z "${BOT_TOKEN:-}" ]]; then

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -22,10 +23,15 @@ import (
 
 func main() {
 	selftest := flag.Bool("selftest", false, "run one diagnostic request and exit")
+	dbcheck := flag.Bool("dbcheck", false, "verify DATABASE_URL and the schema, then exit")
 	flag.Parse()
 
 	if *selftest {
 		runSelftest()
+		return
+	}
+	if *dbcheck {
+		runDBCheck()
 		return
 	}
 
@@ -137,6 +143,36 @@ func orNone(s string) string {
 		return "(none)"
 	}
 	return s
+}
+
+// runDBCheck verifies DATABASE_URL end to end: connect, migrate, query.
+//
+//	heroku run --type=worker bin/hotmail-checker -dbcheck
+func runDBCheck() {
+	dsn := strings.TrimSpace(os.Getenv("DATABASE_URL"))
+	if dsn == "" {
+		fmt.Println("DATABASE_URL is not set")
+		os.Exit(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+
+	pg, err := store.OpenPostgres(ctx, dsn)
+	if err != nil {
+		fmt.Printf("connect failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer pg.Close()
+
+	n, err := pg.Count(ctx)
+	if err != nil {
+		fmt.Printf("query failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("connected, schema applied")
+	fmt.Printf("user_proxies rows: %d\n", n)
 }
 
 func setupLogger(level string) {

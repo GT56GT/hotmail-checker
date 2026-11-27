@@ -14,7 +14,8 @@ const usageText = `Send me Microsoft cookies and I'll tell you which ones still 
 
 *How to send*
 • Paste cookie string(s), one account per line
-• Or upload a .txt file
+• Upload a .txt file
+• Upload a .zip of logs — every file inside is parsed and merged
 • No batch limit — send as many as you want
 
 *Accepted formats*
@@ -26,10 +27,15 @@ const usageText = `Send me Microsoft cookies and I'll tell you which ones still 
 MSPAuth · MSPProf · ANON
 
 *Inbox search*
-` + "`/search invoice`" + ` — then send cookies to search every live account's inbox for that keyword.
+` + "`/search invoice`" + ` — then send cookies or a zip to search every live account's inbox for that keyword.
 
 *Your own proxies*
-` + "`/proxies add`" + ` — then paste your list. All formats accepted. Your checks run through your proxies.
+` + "`/proxies add`" + ` — then paste your list. All formats accepted.
+
+*You get back*
+• ` + "`cookies_<id>.txt`" + ` — working cookies only
+• ` + "`report_<id>.txt`" + ` — per-account detail with search matches
+• ` + "`results_<id>.zip`" + ` — report, cookies, accounts.csv, dead.txt, search.csv
 
 *Commands*
 /start — this message
@@ -103,7 +109,7 @@ func (b *Bot) cmdSearch(bot *gotgbot.Bot, ctx *ext.Context) error {
 		term := strings.TrimSpace(body[:idx])
 		rest := strings.TrimSpace(body[idx+1:])
 		if term != "" && looksLikeCookie(rest) {
-			return b.startJob(bot, m, user.Id, rest, term)
+			return b.startJob(bot, m, user.Id, parseIntake("pasted", []byte(rest)), term)
 		}
 	}
 

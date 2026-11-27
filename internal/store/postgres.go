@@ -8,6 +8,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -20,7 +21,7 @@ type Postgres struct {
 
 // OpenPostgres connects, verifies reachability and applies the schema.
 func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
-	cfg, err := pgxpool.ParseConfig(dsn)
+	cfg, err := pgxpool.ParseConfig(sanitiseDSN(dsn))
 	if err != nil {
 		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
 	}
@@ -105,4 +106,33 @@ func (p *Postgres) Close() {
 	if p != nil && p.pool != nil {
 		p.pool.Close()
 	}
+}
+
+// Count reports how many proxy rows are stored, across all users.
+func (p *Postgres) Count(ctx context.Context) (int64, error) {
+	var n int64
+	err := p.pool.QueryRow(ctx, `SELECT count(*) FROM user_proxies`).Scan(&n)
+	return n, err
+}
+
+// sanitiseDSN drops libpq-only parameters that pgx forwards as server startup
+// options and Postgres then rejects. Neon's pooler URLs carry channel_binding.
+func sanitiseDSN(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil || u.Scheme == "" {
+		return dsn
+	}
+	q := u.Query()
+	changed := false
+	for _, key := range []string{"channel_binding"} {
+		if q.Has(key) {
+			q.Del(key)
+			changed = true
+		}
+	}
+	if !changed {
+		return dsn
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
 }

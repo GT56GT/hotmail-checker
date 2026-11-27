@@ -57,7 +57,7 @@ func (b *Bot) onMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if p.kind == pendingSearch {
 		term = p.term
 	}
-	return b.startJob(bot, m, user.Id, text, term)
+	return b.startJob(bot, m, user.Id, parseIntake("pasted", []byte(text)), term)
 }
 
 func (b *Bot) onDocument(bot *gotgbot.Bot, ctx *ext.Context) error {
@@ -90,40 +90,52 @@ func (b *Bot) onDocument(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if p.kind == pendingSearch {
 		term = p.term
 	}
-	return b.startJob(bot, m, user.Id, string(data), term)
+
+	name := m.Document.FileName
+	if name == "" {
+		name = "upload"
+	}
+	return b.startJob(bot, m, user.Id, parseIntake(name, data), term)
 }
 
-// startJob parses cookies, enforces limits, and runs the check. When term is
-// non-empty every live account is searched after the check completes.
-func (b *Bot) startJob(bot *gotgbot.Bot, m *gotgbot.Message, userID int64, text, term string) error {
-	cookies, issues := checker.ParseBlock(text)
-
-	if len(cookies) == 0 {
-		msg := "No valid cookies found."
-		if len(issues) > 0 {
-			msg += "\n\n" + summariseIssues(issues)
+// startJob validates an intake, enforces fairness limits, and runs the check.
+// When term is non-empty every live account is searched after the check.
+func (b *Bot) startJob(bot *gotgbot.Bot, m *gotgbot.Message, userID int64, in intake, term string) error {
+	if len(in.cookies) == 0 {
+		var sb strings.Builder
+		sb.WriteString("No valid cookies found.")
+		if len(in.issues) > 0 {
+			sb.WriteString("\n\n" + summariseIssues(in.issues))
 		}
-		_, err := m.Reply(bot, msg, nil)
+		if len(in.skipped) > 0 {
+			sb.WriteString("\n\nSkipped:\n" + previewLines(in.skipped, 4))
+		}
+		_, err := m.Reply(bot, sb.String(), nil)
 		return err
 	}
 
 	// A zero cap means no limit; the upload size is the only bound.
-	if b.cfg.MaxCookiesPerJob > 0 && len(cookies) > b.cfg.MaxCookiesPerJob {
+	if b.cfg.MaxCookiesPerJob > 0 && len(in.cookies) > b.cfg.MaxCookiesPerJob {
 		_, err := m.Reply(bot, fmt.Sprintf(
-			"Too many accounts: %d. Limit is %d per job.", len(cookies), b.cfg.MaxCookiesPerJob), nil)
+			"Too many accounts: %d. Limit is %d per job.", len(in.cookies), b.cfg.MaxCookiesPerJob), nil)
 		return err
 	}
 
-	j, err := b.reg.Begin(context.Background(), userID, len(cookies))
+	j, err := b.reg.Begin(context.Background(), userID, len(in.cookies))
 	if err != nil {
 		_, rerr := m.Reply(bot, friendlyRegistryError(err), nil)
 		return rerr
 	}
+	j.Source = in.source
 	defer b.reg.Finish(userID)
 
-	headline := fmt.Sprintf("Queued %d account(s). Starting…", len(cookies))
+	headline := fmt.Sprintf("Queued %d account(s) from %s. Starting…", len(in.cookies), in.source)
 	if term != "" {
-		headline = fmt.Sprintf("Queued %d account(s). Checking, then searching inboxes for \"%s\"…", len(cookies), term)
+		headline = fmt.Sprintf("Queued %d account(s) from %s.\nChecking, then searching for \"%s\"…",
+			len(in.cookies), in.source, term)
+	}
+	if len(in.skipped) > 0 {
+		headline += fmt.Sprintf("\n(%d file(s) skipped)", len(in.skipped))
 	}
 
 	status, err := m.Reply(bot, headline, nil)
@@ -131,7 +143,7 @@ func (b *Bot) startJob(bot *gotgbot.Bot, m *gotgbot.Message, userID int64, text,
 		return err
 	}
 
-	b.runJob(bot, j, cookies, status, term)
+	b.runJob(bot, j, in.cookies, status, term)
 	return nil
 }
 
@@ -369,37 +381,41 @@ func (b *Bot) deliver(bot *gotgbot.Bot, j *job.Job, status *gotgbot.Message, sea
 	}
 
 	chatID := status.Chat.Id
+	bun := buildBundle(hits, dead, challenged, errs, searches, term, j)
 
 	if len(hits) > 0 {
-		_, err := bot.SendDocument(chatID,
-			gotgbot.InputFileByReader(fmt.Sprintf("cookies_%s.txt", j.ID), strings.NewReader(buildCookieFile(hits))),
+		if _, err := bot.SendDocument(chatID,
+			gotgbot.InputFileByReader(fmt.Sprintf("cookies_%s.txt", j.ID), strings.NewReader(bun.cookies)),
 			&gotgbot.SendDocumentOpts{
 				Caption: fmt.Sprintf("%d working cookie(s) — drop-in ready", len(hits)),
-			})
-		if err != nil {
+			}); err != nil {
 			slog.Warn("send cookies file failed", "err", err)
 		}
 	} else {
 		_, _ = bot.SendMessage(chatID, "No working cookies in this batch.", nil)
 	}
 
-	report := buildReport(hits, dead, challenged, errs, j)
 	if _, err := bot.SendDocument(chatID,
-		gotgbot.InputFileByReader(fmt.Sprintf("report_%s.txt", j.ID), strings.NewReader(report)),
+		gotgbot.InputFileByReader(fmt.Sprintf("report_%s.txt", j.ID), strings.NewReader(bun.report)),
 		&gotgbot.SendDocumentOpts{
-			Caption: "Full check report",
+			Caption: "Full report",
 		}); err != nil {
 		slog.Warn("send report failed", "err", err)
 	}
 
-	if term != "" {
-		results := buildSearchFile(searches, term)
+	// A ZIP keeps large or searched jobs to a single download.
+	if term != "" || len(hits)+len(dead) > 50 {
+		zipped, err := zipBundle(bun, term)
+		if err != nil {
+			slog.Warn("zip bundle failed", "err", err)
+			return
+		}
 		if _, err := bot.SendDocument(chatID,
-			gotgbot.InputFileByReader(fmt.Sprintf("search_%s.txt", j.ID), strings.NewReader(results)),
+			gotgbot.InputFileByReader(fmt.Sprintf("results_%s.zip", j.ID), strings.NewReader(string(zipped))),
 			&gotgbot.SendDocumentOpts{
-				Caption: fmt.Sprintf("Inbox search — \"%s\" — %d match(es)", term, countMatches(searches)),
+				Caption: "report.txt · cookies.txt · accounts.csv · dead.txt · search.csv",
 			}); err != nil {
-			slog.Warn("send search file failed", "err", err)
+			slog.Warn("send bundle failed", "err", err)
 		}
 	}
 }

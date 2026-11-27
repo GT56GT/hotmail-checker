@@ -84,6 +84,21 @@ Two guards remain, both about fairness rather than size:
 
 Memory stays flat because dead cookies are reduced to a short label before storage; only live hits keep their full cookie map, and those are needed for search.
 
+### 3.1 ZIP intake
+
+A single upload can be a raw list, a text file, or a ZIP of logs. Every text entry is parsed and merged, then deduplicated by a hash of the normalised cookie header, so overlapping logs collapse to one entry per session.
+
+Bounds, because a ZIP is attacker-controlled:
+
+| Limit | Value |
+|---|---|
+| Files | 500 |
+| Per-file size | 16 MB |
+| Total uncompressed | 128 MB |
+| Skipped | binaries, `__MACOSX`, path traversal |
+
+Nothing is written to disk — entries are read straight from memory — so extraction cannot escape anywhere. Skipped entries are reported back to the user rather than silently dropped.
+
 ---
 
 ## 4. Per-user proxy lists
@@ -125,6 +140,14 @@ Heroku's filesystem is ephemeral, so user lists need a store.
 | `DATABASE_URL` unset | lists live in memory only; the bot says so in `/stats` and `/proxies` |
 
 Neon or Supabase free tier is enough — the table holds a few hundred rows. Heroku Postgres Essential-0 also works but adds $5/mo.
+
+Deployment is wired to a Neon pooler URL. Neon appends `channel_binding=require`, which pgx forwards as a server startup option and Postgres then rejects, so `sanitiseDSN` strips it before parsing. Verified end to end with:
+
+```bash
+bin/hotmail-checker -dbcheck
+# connected, schema applied
+# user_proxies rows: 10
+```
 
 Schema:
 
@@ -181,12 +204,44 @@ An account without Graph consent still returns results through REST. If all thre
 
 ### 5.3 Output
 
+Every job produces three artefacts:
+
+| File | Contents |
+|---|---|
+| `cookies_<id>.txt` | working cookies only, one per line, drop-in |
+| `report_<id>.txt` | per-account detail with search matches inline |
+| `results_<id>.zip` | `report.txt`, `cookies.txt`, `accounts.csv`, `dead.txt`, `search.csv` |
+
+The zip is sent when a search ran or the batch exceeds 50 accounts, so small jobs stay to two files.
+
+Report shape:
+
 ```
-## user@hotmail.com — 3 match(es) via graph
-2026-11-20 14:32 | billing@vendor.com | Invoice #4491 — payment due
-    Hi, attached is invoice 4491 for the period ending Nov 30…
-    https://outlook.live.com/mail/0/inbox/id/...
+# hotmail-checker results
+# job       1234-5678
+# source    logs.zip (14 file(s) in zip)
+# checked   1840
+# live      42
+...
+
+## LIVE
+
+### 1. user@hotmail.com
+status : live
+name   : Jane Doe
+proxy  : 1.2.3.4:8080
+search : 3 match(es) for "invoice" via graph
+
+  2026-11-20 14:32 | billing@vendor.com | Invoice #4491 — payment due
+      Hi, attached is invoice 4491 for the period ending Nov 30…
+      https://outlook.live.com/mail/0/inbox/id/...
+
+## CHALLENGED — session valid, needs consent or re-auth
+## DEAD
+## ERRORS (grouped)
 ```
+
+`accounts.csv` is `email,name,status,proxy,search_matches`; `search.csv` is `email,date,from,subject,link`.
 
 ### 5.4 Caps
 
@@ -259,6 +314,7 @@ hotmail-checker/
 ├── go.mod / go.sum
 ├── internal/
 │   ├── config/config.go        env parsing + limits
+│   ├── archive/                zip extract/build with bomb limits + tests
 │   ├── checker/
 │   │   ├── parse.go            raw / netscape / json cookie parsing
 │   │   ├── parse_test.go
@@ -276,8 +332,10 @@ hotmail-checker/
 │       ├── bot.go              dispatcher, polling, pending state
 │       ├── commands.go         /start /search /cancel /stats
 │       ├── proxies.go          /proxies add|list|test|del|clear
+│       ├── intake.go           paste / txt / zip → cookie sets
+│       ├── report.go           consolidated report + csv + zip bundle
 │       ├── check.go            intake, workers, search phase, delivery
-│       └── format.go           cookies / report / search builders
+│       └── format.go           small formatting helpers
 ├── tools/probe/                endpoint diagnostics
 └── bin/                        build output (gitignored)
 ```

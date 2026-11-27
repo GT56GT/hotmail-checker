@@ -54,13 +54,19 @@ TLS impersonation via `bogdanfinn/tls-client` (uTLS, Chrome 124 profile) — Mic
 ## Check
 
 ```
-paste cookies or upload .txt
+paste cookies, upload .txt, or upload a .zip of logs
+  → every file inside the zip is parsed and merged
   → live progress
   → cookies_<job>.txt   working cookies only, drop-in
-  → report_<job>.txt    email, name, dead, challenged, errors
+  → report_<job>.txt    per-account detail incl. search matches
+  → results_<job>.zip   report · cookies · accounts.csv · dead.txt · search.csv
 ```
 
-**No batch limit.** Send 10 or 10,000 — the only bound is the 20 MB upload cap. Formats: raw header, JSON export, Netscape `cookies.txt`. Required cookies: `MSPAuth`, `MSPProf`, `ANON`.
+**No batch limit.** Send 10 or 10,000 — the only bound is the 20 MB upload cap. Cookies inside a zip are deduplicated across files, so overlapping logs collapse to one entry each.
+
+Formats: raw header, JSON export, Netscape `cookies.txt`. Required cookies: `MSPAuth`, `MSPProf`, `ANON`.
+
+Zip safety: 500 files max, 16 MB per file, 128 MB uncompressed total. Binary files, macOS `__MACOSX` metadata and path-traversal entries are skipped, and the bot reports what it ignored.
 
 ## Your own proxies
 
@@ -99,15 +105,23 @@ Separators: newlines, commas or semicolons. `#` lines are ignored. Up to 500 per
 
 ```
 /search invoice
-  → send cookies
+  → send cookies or a zip
   → check runs, then every live account is searched
-  → search_<job>.txt
+  → matches are folded into report_<job>.txt and shipped as search.csv inside the zip
 ```
 
+Per account, in the report:
+
 ```
-2026-11-20 14:32 | billing@vendor.com | Invoice #4491 — payment due
-    Hi, attached is invoice 4491 for the period ending Nov 30…
-    https://outlook.live.com/mail/0/inbox/id/...
+### 1. user@hotmail.com
+status : live
+name   : Jane Doe
+proxy  : 1.2.3.4:8080
+search : 3 match(es) for "invoice" via graph
+
+  2026-11-20 14:32 | billing@vendor.com | Invoice #4491 — payment due
+      Hi, attached is invoice 4491 for the period ending Nov 30…
+      https://outlook.live.com/mail/0/inbox/id/...
 ```
 
 Token chain: Graph Mail.Read → Outlook REST (Graph scope) → Outlook REST (mail scope). First one that answers wins, so accounts without Graph consent still return results.

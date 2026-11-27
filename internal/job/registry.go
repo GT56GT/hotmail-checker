@@ -43,6 +43,7 @@ type Job struct {
 	ID      string
 	UserID  int64
 	Total   int
+	Source  string
 	Started time.Time
 	Ctx     context.Context
 
