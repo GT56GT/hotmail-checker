@@ -11,32 +11,38 @@ import (
 )
 
 type Config struct {
-	BotToken         string
-	AdminIDs         []int64
-	BannedIDs        []int64
-	ProxyListURL     string
-	Proxies          []string
-	Concurrency      int
-	Timeout          time.Duration
-	MaxCookiesPerJob int
-	Cooldown         time.Duration
-	ProxyRefresh     time.Duration
-	LogLevel         string
+	BotToken           string
+	AdminIDs           []int64
+	BannedIDs          []int64
+	ProxyListURL       string
+	Proxies            []string
+	Concurrency        int
+	Timeout            time.Duration
+	MaxCookiesPerJob   int
+	MaxSearchAccounts  int
+	SearchResultsLimit int
+	MaxSearchTermLen   int
+	Cooldown           time.Duration
+	ProxyRefresh       time.Duration
+	LogLevel           string
 }
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		BotToken:         strings.TrimSpace(os.Getenv("BOT_TOKEN")),
-		AdminIDs:         envIDs("ADMIN_IDS"),
-		BannedIDs:        envIDs("BANNED_IDS"),
-		ProxyListURL:     strings.TrimSpace(os.Getenv("PROXY_LIST_URL")),
-		Proxies:          envLines("PROXY_LIST"),
-		Concurrency:      envInt("CHECK_CONCURRENCY", 20),
-		Timeout:          time.Duration(envInt("CHECK_TIMEOUT", 30)) * time.Second,
-		MaxCookiesPerJob: envInt("MAX_COOKIES_PER_JOB", 500),
-		Cooldown:         time.Duration(envInt("JOB_COOLDOWN_SECONDS", 30)) * time.Second,
-		ProxyRefresh:     time.Duration(envInt("PROXY_REFRESH_MINUTES", 10)) * time.Minute,
-		LogLevel:         envStr("LOG_LEVEL", "info"),
+		BotToken:           strings.TrimSpace(os.Getenv("BOT_TOKEN")),
+		AdminIDs:           envIDs("ADMIN_IDS"),
+		BannedIDs:          envIDs("BANNED_IDS"),
+		ProxyListURL:       strings.TrimSpace(os.Getenv("PROXY_LIST_URL")),
+		Proxies:            envLines("PROXY_LIST"),
+		Concurrency:        envInt("CHECK_CONCURRENCY", 20),
+		Timeout:            time.Duration(envInt("CHECK_TIMEOUT", 30)) * time.Second,
+		MaxCookiesPerJob:   envInt("MAX_COOKIES_PER_JOB", 2000),
+		MaxSearchAccounts:  envInt("MAX_SEARCH_ACCOUNTS", 20),
+		SearchResultsLimit: envInt("SEARCH_RESULTS_LIMIT", 25),
+		MaxSearchTermLen:   envInt("MAX_SEARCH_TERM_LENGTH", 120),
+		Cooldown:           time.Duration(envInt("JOB_COOLDOWN_SECONDS", 30)) * time.Second,
+		ProxyRefresh:       time.Duration(envInt("PROXY_REFRESH_MINUTES", 10)) * time.Minute,
+		LogLevel:           envStr("LOG_LEVEL", "info"),
 	}
 
 	if cfg.BotToken == "" {
@@ -51,6 +57,15 @@ func Load() (*Config, error) {
 	}
 	if cfg.MaxCookiesPerJob < 1 {
 		cfg.MaxCookiesPerJob = 1
+	}
+	if cfg.MaxSearchAccounts < 1 {
+		cfg.MaxSearchAccounts = 1
+	}
+	if cfg.SearchResultsLimit < 1 || cfg.SearchResultsLimit > 200 {
+		cfg.SearchResultsLimit = 25
+	}
+	if cfg.MaxSearchTermLen < 8 {
+		cfg.MaxSearchTermLen = 8
 	}
 	if cfg.Timeout < 5*time.Second {
 		cfg.Timeout = 5 * time.Second

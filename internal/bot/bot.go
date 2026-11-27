@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/GT56GT/hotmail-checker/internal/checker"
@@ -25,6 +26,15 @@ type Bot struct {
 	reg    *job.Registry
 	client *gotgbot.Bot
 	http   *http.Client
+
+	mu      sync.Mutex
+	pending map[int64]pendingSearch
+}
+
+// pendingSearch is a search term waiting for the user to send cookies.
+type pendingSearch struct {
+	term    string
+	expires time.Time
 }
 
 // New validates the token and builds the handler set.
@@ -39,12 +49,13 @@ func New(cfg *config.Config, chk *checker.Checker, pool *proxy.Pool, reg *job.Re
 	}
 
 	return &Bot{
-		cfg:    cfg,
-		chk:    chk,
-		pool:   pool,
-		reg:    reg,
-		client: client,
-		http:   &http.Client{Timeout: 60 * time.Second},
+		cfg:     cfg,
+		chk:     chk,
+		pool:    pool,
+		reg:     reg,
+		client:  client,
+		http:    &http.Client{Timeout: 60 * time.Second},
+		pending: make(map[int64]pendingSearch),
 	}, nil
 }
 
@@ -61,6 +72,7 @@ func (b *Bot) Run(ctx context.Context) error {
 
 	dispatcher.AddHandler(handlers.NewCommand("start", b.cmdStart))
 	dispatcher.AddHandler(handlers.NewCommand("help", b.cmdStart))
+	dispatcher.AddHandler(handlers.NewCommand("search", b.cmdSearch))
 	dispatcher.AddHandler(handlers.NewCommand("cancel", b.cmdCancel))
 	dispatcher.AddHandler(handlers.NewCommand("stats", b.cmdStats))
 	dispatcher.AddHandler(handlers.NewCommand("proxies", b.cmdProxies))

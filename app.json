@@ -1,8 +1,8 @@
 {
   "name": "hotmail-checker",
-  "description": "Hotmail cookie validator - Telegram bot",
+  "description": "Hotmail cookie validator with inbox search - Telegram bot",
   "repository": "https://github.com/GT56GT/hotmail-checker",
-  "keywords": ["telegram", "bot", "checker", "go", "tls"],
+  "keywords": ["telegram", "bot", "checker", "go", "tls", "mail-search"],
   "stack": "heroku-24",
   "buildpacks": [
     { "url": "heroku/go" }
@@ -31,7 +31,17 @@
     },
     "MAX_COOKIES_PER_JOB": {
       "description": "Maximum accounts accepted per upload",
-      "value": "500",
+      "value": "2000",
+      "required": false
+    },
+    "MAX_SEARCH_ACCOUNTS": {
+      "description": "Live accounts searched per job",
+      "value": "20",
+      "required": false
+    },
+    "SEARCH_RESULTS_LIMIT": {
+      "description": "Messages returned per searched account",
+      "value": "25",
       "required": false
     },
     "LOG_LEVEL": {

@@ -104,6 +104,21 @@ func runSelftest() {
 	default:
 		fmt.Println("\nWARNING — expected dead (redirect to signin). Investigate before deploying.")
 	}
+
+	// Exercise the search path too. With an invalid cookie it must degrade to
+	// "search unavailable" rather than panic — that proves the token chain and
+	// both API decoders are wired.
+	fmt.Println("\nissuing one inbox search (expected: unavailable)…")
+	sres := chk.Search(ctx, ck, "", "invoice", 5)
+	fmt.Printf("method: %s\nitems:  %d\nreason: %s\nelapsed: %s\n",
+		orNone(sres.Method), len(sres.Items), orNone(sres.Reason), sres.Elapsed.Round(time.Millisecond))
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return s
 }
 
 func setupLogger(level string) {

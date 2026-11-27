@@ -1,6 +1,6 @@
 # Hotmail Cookie Checker — Go / Heroku
 
-Telegram bot that validates Microsoft consumer session cookies in bulk, returns the ones that still work as a downloadable file, and reports identity for each live account.
+Telegram bot that validates Microsoft consumer session cookies in bulk, returns the ones that still work as a downloadable file, reports identity for each live account, and searches live inboxes for keywords.
 
 Free for everyone. One Heroku Eco worker dyno. No database, no disk, no Redis.
 
@@ -51,7 +51,7 @@ And the successful case hands back a token that resolves the account identity in
 ```
 cookie set
    │
-   ├─ GET silentOAuth (prompt=none)
+   ├─ GET silentOAuth (prompt=none, MBI_SSL scope)
    │      │
    │      ├─ #access_token=…            → LIVE
    │      │      └─ GET substrate profile → email + display name
@@ -70,8 +70,6 @@ cookie set
           └─ other                      → ERROR
 ```
 
-Four verdicts plus rate limiting:
-
 | Verdict | Meaning |
 |---|---|
 | `live` | session works, mail accessible |
@@ -84,20 +82,86 @@ Four verdicts plus rate limiting:
 
 ---
 
-## 3. Architecture
+## 3. Inbox search
+
+After a check completes, every live account in the batch is searched for the user's keyword.
+
+### 3.1 Scope research
+
+The OAuth client was tested against four scopes with an invalid cookie. All four returned `error=login_required` rather than `invalid_scope`, which confirms the client is registered for each of them:
+
+| Scope | Response |
+|---|---|
+| `service::outlook.office.com::MBI_SSL` | `login_required` ✓ |
+| `https://graph.microsoft.com/Mail.Read` | `login_required` ✓ |
+| `https://outlook.office.com/mail.read` | `login_required` ✓ |
+| Graph + REST combined | `login_required` ✓ |
+
+Endpoint shapes were confirmed reachable:
+
+| Endpoint | No token |
+|---|---|
+| `graph.microsoft.com/v1.0/me/messages` | 401 `InvalidAuthenticationToken` |
+| `outlook.office.com/api/v2.0/me/messages` | 401 |
+| `outlook.live.com/owa/service.svc?action=FindItem` | 401 |
+
+### 3.2 Token chain
+
+Accounts differ in which scopes they have consented to, so search tries three paths and takes the first that answers:
+
+```
+Graph token      → GET graph.microsoft.com/v1.0/me/messages?$search="term"
+REST (graph tok) → GET outlook.office.com/api/v2.0/me/messages?$search="term"
+REST (mail tok)  → same endpoint, mail-scope token
+```
+
+An account without Graph consent still returns results through the REST path. If all three fail, the account is reported as `search unavailable` — never as a false negative on the check itself.
+
+### 3.3 Result shape
+
+Per account: date, sender, subject, body preview (180 chars), and the message web link.
+
+```
+## user@hotmail.com — 3 match(es) via graph
+2026-11-20 14:32 | billing@vendor.com | Invoice #4491 — payment due
+    Hi, attached is invoice 4491 for the period ending Nov 30…
+    https://outlook.live.com/mail/0/inbox/id/...
+```
+
+### 3.4 Limits
+
+Search is capped independently of the check:
+
+| Limit | Default | Env |
+|---|---|---|
+| Accounts searched per job | 20 | `MAX_SEARCH_ACCOUNTS` |
+| Messages per account | 25 | `SEARCH_RESULTS_LIMIT` |
+| Search term length | 120 chars | `MAX_SEARCH_TERM_LENGTH` |
+| Concurrent searches | 3 | — |
+
+Only live hits are searched, so dead cookies never consume a search slot.
+
+---
+
+## 4. Architecture
 
 ```
 Telegram ──long poll──► worker dyno (single process)
                            │
                            ├─ gotgbot dispatcher
                            ├─ in-memory job registry (one job per user)
+                           ├─ pending-search map (armed terms, 5 min TTL)
                            ├─ N goroutine workers (default 20)
                            │      ├─ proxy pool (per-proxy semaphore, quarantine)
                            │      └─ tls-client pool (one client per proxy)
                            │
+                           ├─ check phase → verdicts
+                           ├─ search phase (only if armed) → matches
+                           │
                            └─ results
-                                  ├─ cookies_<job>.txt  → Telegram (working cookies only)
-                                  └─ report_<job>.txt   → Telegram (full detail)
+                                  ├─ cookies_<job>.txt  working cookies only
+                                  ├─ report_<job>.txt   full check detail
+                                  └─ search_<job>.txt   inbox matches
 ```
 
 No database. Telegram is the store — a delivered file stays in the chat indefinitely, so the user can re-download whenever they want without the bot retaining anything.
@@ -106,7 +170,7 @@ In-flight jobs live in a mutex-guarded map. A dyno restart drops them; the user 
 
 ---
 
-## 4. Dyno and cost
+## 5. Dyno and cost
 
 | Item | Plan | Monthly |
 |---|---|---|
@@ -123,25 +187,28 @@ Polling keeps a long-poll connection open every 25–30 seconds, which counts as
 
 `heroku ps:scale worker=2` breaks the bot. Telegram allows one `getUpdates` consumer per token — the second instance gets `409 Conflict` and both start dropping updates.
 
-Throughput comes from goroutines inside the process, not from dyno count. Written down so it does not get "fixed" later.
+Throughput comes from goroutines inside the process, not from dyno count.
 
 ---
 
-## 5. Free-for-all limits
+## 6. Free-for-all limits
 
 The bot is open to everyone, so one user must not be able to starve the rest. Limits live at the pool level, identical for every user:
 
 | Limit | Default | Env |
 |---|---|---|
 | Concurrent jobs per user | 1 | — |
-| Max accounts per upload | 500 | `MAX_COOKIES_PER_JOB` |
+| Max accounts per upload | 2000 | `MAX_COOKIES_PER_JOB` |
 | Cooldown between jobs | 30s | `JOB_COOLDOWN_SECONDS` |
 | Global concurrent checks | 20 | `CHECK_CONCURRENCY` |
 | Concurrent checks per proxy | 4 | — |
+| Upload size | 10 MB | — |
+
+At 2000 accounts with 20 workers, a full batch runs roughly 2–4 minutes of wall time, then search adds up to 20 mailbox queries at concurrency 3.
 
 ---
 
-## 6. Proxy layer
+## 7. Proxy layer
 
 Proxies are fuel, not an optimisation. Microsoft 429s datacenter ranges within minutes.
 
@@ -155,7 +222,7 @@ Mobile and residential survive. Datacenter dies.
 
 ---
 
-## 7. Project layout
+## 8. Project layout
 
 ```
 hotmail-checker/
@@ -164,25 +231,27 @@ hotmail-checker/
 ├── app.json                    Heroku manifest (eco worker, go buildpack)
 ├── go.mod / go.sum
 ├── internal/
-│   ├── config/config.go        env parsing
+│   ├── config/config.go        env parsing + limits
 │   ├── checker/
 │   │   ├── parse.go            raw / netscape / json cookie parsing
 │   │   ├── parse_test.go       parser + identity tests
 │   │   ├── identity.go         email + display name extraction
-│   │   └── check.go            OAuth probe, fallback probe, verdicts
+│   │   ├── check.go            OAuth probe, fallback probe, verdicts
+│   │   └── search.go           Graph + REST mail search, token chain
 │   ├── proxy/pool.go           rotation, semaphores, quarantine
 │   ├── job/registry.go         job lifecycle, per-user limits
 │   └── bot/
 │       ├── bot.go              dispatcher, polling
-│       ├── commands.go         /start /cancel /stats /proxies
-│       ├── check.go            intake, worker pool, progress, delivery
-│       └── format.go           result file builders
+│       ├── commands.go         /start /search /cancel /stats /proxies
+│       ├── check.go            intake, worker pool, search phase, delivery
+│       └── format.go           cookies / report / search file builders
+├── tools/probe/                endpoint diagnostics (not shipped logic)
 └── bin/                        build output (gitignored)
 ```
 
 ---
 
-## 8. Deploy runbook
+## 9. Deploy runbook
 
 ```bash
 heroku create <app-name> --stack heroku-24
@@ -193,40 +262,44 @@ heroku ps:scale worker=1 web=0
 heroku logs --tail
 ```
 
-Verify the TLS layer and endpoint reachability on the deployed dyno:
+Verify the TLS layer, the check probe and the search path on the deployed dyno:
 
 ```bash
 heroku run --type=worker bin/hotmail-checker -selftest
 ```
 
-Expected output:
+Expected:
 
 ```
 verdict: dead
 reason:  session expired
 OK — TLS impersonation works and the endpoint answered.
+
+issuing one inbox search (expected: unavailable)…
+reason: search unavailable for this account
 ```
 
-A `403 forbidden` means the fingerprint is not matching. A timeout means the dyno cannot reach Microsoft.
-
-If the Procfile path is wrong, the buildpack logs will show it — `heroku run bash` then `ls bin/` confirms the binary name.
+A `403 forbidden` means the fingerprint is not matching. A timeout means the dyno cannot reach Microsoft. A search that hangs means the token chain is reaching endpoints but not resolving — re-run `go run ./tools/probe` locally.
 
 ---
 
-## 9. Local
+## 10. Local
 
 ```bash
 go build -o bin/hotmail-checker .
 ./bin/hotmail-checker -selftest        # no token needed
 BOT_TOKEN=... ./bin/hotmail-checker    # full bot
+go run ./tools/probe                   # endpoint diagnostics
 ```
 
 ---
 
-## 10. Known limits
+## 11. Known limits
 
 - **Restart drops jobs.** No persistence by design. Users resend.
 - **Go 1.27 required.** `tls-client` and `fhttp` pin it. Heroku's Go buildpack installs from `go.dev`, which has it.
+- **Search depends on consent.** Some accounts will not have Graph Mail.Read consented; the REST fallback covers most. If all three token paths fail, that account reports `search unavailable`.
+- **`$search` semantics are server-side.** Graph treats the term as a KQL-style query, so quotes and operators inside the keyword can change behaviour. Terms are wrapped in double quotes before escaping.
 - **Identity depends on the substrate profile call.** If that endpoint changes, live accounts still report correctly but without an email.
 - **No hit archive.** Nothing is retained server-side; Telegram holds the delivered files.
-- **OAuth client dependency.** If Microsoft retires client `000000004C12AE6F`, the fallback `GetOwaUserConfiguration` probe keeps verdicts correct but identity resolution degrades. The code already branches on `unauthorized_client`.
+- **OAuth client dependency.** If Microsoft retires client `000000004C12AE6F`, the fallback `GetOwaUserConfiguration` probe keeps verdicts correct but identity and search degrade. The code already branches on `unauthorized_client`.
