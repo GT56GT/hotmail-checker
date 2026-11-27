@@ -266,7 +266,7 @@ func (b *Bot) runSearches(bot *gotgbot.Bot, j *job.Job, status *gotgbot.Message,
 	}
 
 	limit := b.cfg.MaxSearchAccounts
-	if len(hits) < limit {
+	if limit <= 0 || len(hits) < limit {
 		limit = len(hits)
 	}
 	targets := hits[:limit]

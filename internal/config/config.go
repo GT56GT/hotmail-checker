@@ -40,7 +40,7 @@ func Load() (*Config, error) {
 		Concurrency:        envInt("CHECK_CONCURRENCY", 20),
 		Timeout:            time.Duration(envInt("CHECK_TIMEOUT", 30)) * time.Second,
 		MaxCookiesPerJob:   envInt("MAX_COOKIES_PER_JOB", 0),
-		MaxSearchAccounts:  envInt("MAX_SEARCH_ACCOUNTS", 20),
+		MaxSearchAccounts:  envInt("MAX_SEARCH_ACCOUNTS", 0),
 		SearchResultsLimit: envInt("SEARCH_RESULTS_LIMIT", 25),
 		MaxSearchTermLen:   envInt("MAX_SEARCH_TERM_LENGTH", 120),
 		MaxProxiesPerUser:  envInt("MAX_PROXIES_PER_USER", 500),
@@ -62,8 +62,8 @@ func Load() (*Config, error) {
 	if cfg.MaxCookiesPerJob < 0 {
 		cfg.MaxCookiesPerJob = 0
 	}
-	if cfg.MaxSearchAccounts < 1 {
-		cfg.MaxSearchAccounts = 1
+	if cfg.MaxSearchAccounts < 0 {
+		cfg.MaxSearchAccounts = 0
 	}
 	if cfg.SearchResultsLimit < 1 || cfg.SearchResultsLimit > 200 {
 		cfg.SearchResultsLimit = 25

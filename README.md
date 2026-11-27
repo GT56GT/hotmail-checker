@@ -146,7 +146,7 @@ Token chain: Graph Mail.Read → Outlook REST (Graph scope) → Outlook REST (ma
 | `PROXY_LIST_URL` / `PROXY_LIST` | — | shared fallback pool |
 | `CHECK_CONCURRENCY` | 20 | goroutine workers |
 | `MAX_COOKIES_PER_JOB` | 0 | 0 = no limit |
-| `MAX_SEARCH_ACCOUNTS` | 20 | mailboxes searched per job |
+| `MAX_SEARCH_ACCOUNTS` | 0 | live accounts searched (0 = all) |
 | `MAX_PROXIES_PER_USER` | 500 | per-user proxy cap |
 | `JOB_COOLDOWN_SECONDS` | 10 | between jobs |
 | `LOG_LEVEL` | info | |

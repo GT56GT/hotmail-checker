@@ -38,8 +38,8 @@
       "required": false
     },
     "MAX_SEARCH_ACCOUNTS": {
-      "description": "Live accounts searched per job",
-      "value": "20",
+      "description": "Live accounts searched per job. 0 means every live account.",
+      "value": "0",
       "required": false
     },
     "LOG_LEVEL": {

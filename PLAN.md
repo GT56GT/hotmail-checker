@@ -247,12 +247,12 @@ search : 3 match(es) for "invoice" via graph
 
 | Limit | Default | Env |
 |---|---|---|
-| Accounts searched per job | 20 | `MAX_SEARCH_ACCOUNTS` |
+| Accounts searched per job | all live | `MAX_SEARCH_ACCOUNTS` (0 = unlimited) |
 | Messages per account | 25 | `SEARCH_RESULTS_LIMIT` |
 | Search term length | 120 chars | `MAX_SEARCH_TERM_LENGTH` |
 | Concurrent searches | 3 | — |
 
-Only live hits consume a search slot.
+Only live hits consume a search slot, so a 10,000-cookie zip with 40 live accounts performs 40 searches.
 
 ---
 
