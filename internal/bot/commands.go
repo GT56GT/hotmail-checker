@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -14,7 +15,7 @@ const usageText = `Send me Microsoft cookies and I'll tell you which ones still 
 *How to send*
 • Paste cookie string(s), one account per line
 • Or upload a .txt file
-• Up to 2000 accounts per job
+• No batch limit — send as many as you want
 
 *Accepted formats*
 • Raw header — ` + "`MSPAuth=…; MSPProf=…; ANON=…`" + `
@@ -25,15 +26,17 @@ const usageText = `Send me Microsoft cookies and I'll tell you which ones still 
 MSPAuth · MSPProf · ANON
 
 *Inbox search*
-` + "`/search invoice`" + ` — then send cookies to search every live account's inbox for that keyword. Results include subject, sender, date and a preview.
+` + "`/search invoice`" + ` — then send cookies to search every live account's inbox for that keyword.
+
+*Your own proxies*
+` + "`/proxies add`" + ` — then paste your list. All formats accepted. Your checks run through your proxies.
 
 *Commands*
 /start — this message
 /search <term> — arm an inbox search
+/proxies — manage your proxy list
 /cancel — stop a running job
-/stats — live service status
-
-Results arrive as files: working cookies, a full check report, and a search report when searching.`
+/stats — live service status`
 
 const searchUsage = `*Inbox search*
 
@@ -43,7 +46,30 @@ Then send the cookie(s). Every live account in that batch is searched and you ge
 
 Search runs after the check, so dead cookies cost nothing.`
 
-const maxDocBytes = 10 << 20
+const proxiesUsage = `*Your proxies*
+
+` + "`/proxies add`" + ` — paste a list (all formats)
+` + "`/proxies list`" + ` — see what's saved
+` + "`/proxies test`" + ` — check reachability and latency
+` + "`/proxies del <n>`" + ` — remove one by index
+` + "`/proxies clear`" + ` — remove all
+
+*Accepted formats*
+` + "```" + `
+host:port
+host:port:user:pass
+user:pass@host:port
+socks5://host:port
+socks5://user:pass@host:port
+http://host:port
+https://host:port
+[2001:db8::1]:8080
+` + "```" + `
+Separate with newlines, commas or semicolons. Comments with ` + "`#`" + ` are ignored.
+
+Your checks use your proxies. Without them, the shared pool is used.`
+
+const maxDocBytes = 20 << 20
 
 func (b *Bot) cmdStart(bot *gotgbot.Bot, ctx *ext.Context) error {
 	m := ctx.EffectiveMessage
@@ -68,12 +94,7 @@ func (b *Bot) cmdSearch(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	body := commandBody(m.Text, "/search")
 	if body == "" {
-		_, err := m.Reply(bot, searchUsage, &gotgbot.SendMessageOpts{
-			ParseMode: "Markdown",
-			LinkPreviewOptions: &gotgbot.LinkPreviewOptions{
-				IsDisabled: true,
-			},
-		})
+		_, err := m.Reply(bot, searchUsage, &gotgbot.SendMessageOpts{ParseMode: "Markdown"})
 		return err
 	}
 
@@ -95,7 +116,7 @@ func (b *Bot) cmdSearch(bot *gotgbot.Bot, ctx *ext.Context) error {
 		term = string(runes[:b.cfg.MaxSearchTermLen])
 	}
 
-	b.setPending(user.Id, term)
+	b.setPending(user.Id, pending{kind: pendingSearch, term: term})
 
 	_, err := m.Reply(bot, fmt.Sprintf(
 		"Search armed for \"%s\".\n\nNow send the cookie(s). Only live accounts are searched.",
@@ -122,17 +143,35 @@ func (b *Bot) cmdCancel(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 func (b *Bot) cmdStats(bot *gotgbot.Bot, ctx *ext.Context) error {
 	m := ctx.EffectiveMessage
-	total, healthy := b.pool.Stats()
+	user := ctx.EffectiveUser
+	if m == nil || user == nil {
+		return nil
+	}
 
+	ctxBg := context.Background()
 	var sb strings.Builder
 	sb.WriteString("*Service status*\n\n")
 	fmt.Fprintf(&sb, "Active jobs: `%d`\n", b.reg.Count())
 	fmt.Fprintf(&sb, "Concurrency: `%d`\n", b.cfg.Concurrency)
-	fmt.Fprintf(&sb, "Batch limit: `%d` accounts\n", b.cfg.MaxCookiesPerJob)
-	fmt.Fprintf(&sb, "Search per job: `%d` accounts\n", b.cfg.MaxSearchAccounts)
-	fmt.Fprintf(&sb, "Proxies: `%d` healthy / `%d` total\n", healthy, total)
-	if total == 0 {
-		sb.WriteString("\n_No proxies configured — throughput will be limited._\n")
+
+	if b.cfg.MaxCookiesPerJob > 0 {
+		fmt.Fprintf(&sb, "Batch limit: `%d` accounts\n", b.cfg.MaxCookiesPerJob)
+	} else {
+		sb.WriteString("Batch limit: `none`\n")
+	}
+
+	globalTotal, globalHealthy := b.pools.Global().Stats()
+	fmt.Fprintf(&sb, "Shared proxies: `%d` healthy / `%d` total\n", globalHealthy, globalTotal)
+
+	own := b.pools.URLs(ctxBg, user.Id)
+	if len(own) > 0 {
+		fmt.Fprintf(&sb, "Your proxies: `%d` configured\n", len(own))
+	} else {
+		sb.WriteString("Your proxies: `none` — using shared pool\n")
+	}
+
+	if !b.pools.Persistent() {
+		sb.WriteString("\n_No database configured — proxy lists reset on restart._\n")
 	}
 
 	_, err := m.Reply(bot, sb.String(), &gotgbot.SendMessageOpts{
@@ -144,44 +183,30 @@ func (b *Bot) cmdStats(bot *gotgbot.Bot, ctx *ext.Context) error {
 	return err
 }
 
-func (b *Bot) cmdProxies(bot *gotgbot.Bot, ctx *ext.Context) error {
-	m := ctx.EffectiveMessage
-	user := ctx.EffectiveUser
-	if user == nil || !b.cfg.IsAdmin(user.Id) {
-		return nil
-	}
+// --- pending state -------------------------------------------------------
 
-	total, healthy := b.pool.Stats()
-	text := fmt.Sprintf("*Proxy pool*\n\nTotal `%d`\nHealthy `%d`\nQuarantined `%d`",
-		total, healthy, total-healthy)
-
-	_, err := m.Reply(bot, text, &gotgbot.SendMessageOpts{ParseMode: "Markdown"})
-	return err
-}
-
-// --- pending search state -----------------------------------------------
-
-func (b *Bot) setPending(userID int64, term string) {
+func (b *Bot) setPending(userID int64, p pending) {
+	p.expires = time.Now().Add(5 * time.Minute)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.pending[userID] = pendingSearch{term: term, expires: time.Now().Add(5 * time.Minute)}
+	b.pending[userID] = p
 }
 
-// takePending consumes the armed search term, if any and not expired.
-func (b *Bot) takePending(userID int64) string {
+// takePending consumes whatever is armed for this user, if not expired.
+func (b *Bot) takePending(userID int64) pending {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	p, ok := b.pending[userID]
 	if !ok {
-		return ""
+		return pending{kind: pendingNone}
 	}
 	delete(b.pending, userID)
 
 	if time.Now().After(p.expires) {
-		return ""
+		return pending{kind: pendingNone}
 	}
-	return p.term
+	return p
 }
 
 func (b *Bot) clearPending(userID int64) {

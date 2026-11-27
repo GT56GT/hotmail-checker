@@ -18,27 +18,36 @@ import (
 	"github.com/PaulSonOfLars/gotgbot/v2/ext/handlers"
 )
 
+// pendingKind identifies what the next cookie/proxy message should do.
+type pendingKind int
+
+const (
+	pendingNone pendingKind = iota
+	pendingSearch
+	pendingProxyAdd
+)
+
+type pending struct {
+	kind    pendingKind
+	term    string
+	expires time.Time
+}
+
 // Bot holds shared dependencies for every handler.
 type Bot struct {
 	cfg    *config.Config
 	chk    *checker.Checker
-	pool   *proxy.Pool
+	pools  *proxy.Manager
 	reg    *job.Registry
 	client *gotgbot.Bot
 	http   *http.Client
 
 	mu      sync.Mutex
-	pending map[int64]pendingSearch
-}
-
-// pendingSearch is a search term waiting for the user to send cookies.
-type pendingSearch struct {
-	term    string
-	expires time.Time
+	pending map[int64]pending
 }
 
 // New validates the token and builds the handler set.
-func New(cfg *config.Config, chk *checker.Checker, pool *proxy.Pool, reg *job.Registry) (*Bot, error) {
+func New(cfg *config.Config, chk *checker.Checker, pools *proxy.Manager, reg *job.Registry) (*Bot, error) {
 	client, err := gotgbot.NewBot(cfg.BotToken, &gotgbot.BotOpts{
 		BotClient: &gotgbot.BaseBotClient{
 			Client: http.Client{Timeout: 60 * time.Second},
@@ -51,11 +60,11 @@ func New(cfg *config.Config, chk *checker.Checker, pool *proxy.Pool, reg *job.Re
 	return &Bot{
 		cfg:     cfg,
 		chk:     chk,
-		pool:    pool,
+		pools:   pools,
 		reg:     reg,
 		client:  client,
 		http:    &http.Client{Timeout: 60 * time.Second},
-		pending: make(map[int64]pendingSearch),
+		pending: make(map[int64]pending),
 	}, nil
 }
 
@@ -73,9 +82,9 @@ func (b *Bot) Run(ctx context.Context) error {
 	dispatcher.AddHandler(handlers.NewCommand("start", b.cmdStart))
 	dispatcher.AddHandler(handlers.NewCommand("help", b.cmdStart))
 	dispatcher.AddHandler(handlers.NewCommand("search", b.cmdSearch))
+	dispatcher.AddHandler(handlers.NewCommand("proxies", b.cmdProxies))
 	dispatcher.AddHandler(handlers.NewCommand("cancel", b.cmdCancel))
 	dispatcher.AddHandler(handlers.NewCommand("stats", b.cmdStats))
-	dispatcher.AddHandler(handlers.NewCommand("proxies", b.cmdProxies))
 
 	dispatcher.AddHandler(handlers.NewMessage(isCookieMessage, b.onMessage))
 	dispatcher.AddHandler(handlers.NewMessage(isDocumentMessage, b.onDocument))

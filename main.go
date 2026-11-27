@@ -17,6 +17,7 @@ import (
 	"github.com/GT56GT/hotmail-checker/internal/config"
 	"github.com/GT56GT/hotmail-checker/internal/job"
 	"github.com/GT56GT/hotmail-checker/internal/proxy"
+	"github.com/GT56GT/hotmail-checker/internal/store"
 )
 
 func main() {
@@ -39,33 +40,50 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool := proxy.New(4)
+	// Optional persistence for user proxy lists. Without it, lists live only
+	// for the life of this process.
+	var persistence proxy.Store
+	if cfg.DatabaseURL != "" {
+		pg, err := store.OpenPostgres(ctx, cfg.DatabaseURL)
+		if err != nil {
+			slog.Error("database", "err", err)
+			os.Exit(1)
+		}
+		defer pg.Close()
+		persistence = pg
+		slog.Info("database connected — user proxies persist across restarts")
+	} else {
+		slog.Warn("DATABASE_URL not set — user proxy lists reset on restart")
+	}
+
+	pools := proxy.NewManager(4, persistence)
+
 	if len(cfg.Proxies) > 0 {
-		pool.Load(cfg.Proxies)
-		slog.Info("proxies loaded from env", "count", len(cfg.Proxies))
+		pools.Global().Load(cfg.Proxies)
+		slog.Info("shared proxies loaded from env", "count", pools.Global().Len())
 	}
 
 	if cfg.ProxyListURL != "" {
-		if err := pool.Fetch(ctx, cfg.ProxyListURL); err != nil {
-			slog.Warn("initial proxy fetch failed", "err", err)
+		if err := pools.Global().Fetch(ctx, cfg.ProxyListURL); err != nil {
+			slog.Warn("initial shared proxy fetch failed", "err", err)
 		}
-		go pool.RefreshLoop(ctx, cfg.ProxyListURL, cfg.ProxyRefresh)
-	}
-
-	if pool.Len() == 0 {
-		slog.Warn("no proxies configured — checks run direct and will be rate limited quickly")
+		go pools.Global().RefreshLoop(ctx, cfg.ProxyListURL, cfg.ProxyRefresh)
 	}
 
 	reg := job.NewRegistry(cfg.Cooldown)
 	chk := checker.New(cfg.Timeout, cfg.Concurrency)
 
-	b, err := bot.New(cfg, chk, pool, reg)
+	b, err := bot.New(cfg, chk, pools, reg)
 	if err != nil {
 		slog.Error("bot init", "err", err)
 		os.Exit(1)
 	}
 
-	slog.Info("starting", "concurrency", cfg.Concurrency, "proxies", pool.Len())
+	slog.Info("starting",
+		"concurrency", cfg.Concurrency,
+		"shared_proxies", pools.Global().Len(),
+		"persistence", pools.Persistent(),
+	)
 	if err := b.Run(ctx); err != nil {
 		slog.Error("bot run", "err", err)
 		os.Exit(1)

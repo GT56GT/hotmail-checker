@@ -11,8 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/GT56GT/hotmail-checker/internal/checker"
 )
 
 var (
@@ -59,7 +57,7 @@ type Job struct {
 
 	mu       sync.Mutex
 	hits     []Hit
-	deadList []checker.Cookie
+	deadList []string
 	chalList []string
 	errs     []string
 }
@@ -72,10 +70,11 @@ func (j *Job) AddHit(h Hit) {
 	j.live.Add(1)
 }
 
-// AddDead records an expired cookie.
-func (j *Job) AddDead(c checker.Cookie) {
+// AddDead records an expired cookie. Only a short label is retained so a large
+// batch does not pin every cookie string in memory.
+func (j *Job) AddDead(label string) {
 	j.mu.Lock()
-	j.deadList = append(j.deadList, c)
+	j.deadList = append(j.deadList, label)
 	j.mu.Unlock()
 	j.dead.Add(1)
 }
@@ -107,11 +106,11 @@ func (j *Job) Counts() Counts {
 }
 
 // Results returns copies of the accumulated lists.
-func (j *Job) Results() (hits []Hit, dead []checker.Cookie, challenged []string, errs []string) {
+func (j *Job) Results() (hits []Hit, dead []string, challenged []string, errs []string) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	return append([]Hit(nil), j.hits...),
-		append([]checker.Cookie(nil), j.deadList...),
+		append([]string(nil), j.deadList...),
 		append([]string(nil), j.chalList...),
 		append([]string(nil), j.errs...)
 }

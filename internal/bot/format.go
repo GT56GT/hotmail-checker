@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GT56GT/hotmail-checker/internal/checker"
 	"github.com/GT56GT/hotmail-checker/internal/job"
 )
 
@@ -22,7 +21,7 @@ func buildCookieFile(hits []job.Hit) string {
 
 // buildReport renders the full outcome: hits with identity, expired cookies,
 // challenged sessions, and grouped failure reasons.
-func buildReport(hits []job.Hit, dead []checker.Cookie, challenged, errs []string, j *job.Job) string {
+func buildReport(hits []job.Hit, dead []string, challenged, errs []string, j *job.Job) string {
 	var sb strings.Builder
 
 	sb.WriteString("# hotmail-checker report\n")
@@ -57,8 +56,8 @@ func buildReport(hits []job.Hit, dead []checker.Cookie, challenged, errs []strin
 
 	if len(dead) > 0 {
 		sb.WriteString("\n## DEAD\n")
-		for _, c := range dead {
-			fmt.Fprintf(&sb, "%s\n", c.Label())
+		for _, d := range dead {
+			fmt.Fprintf(&sb, "%s\n", d)
 		}
 	}
 

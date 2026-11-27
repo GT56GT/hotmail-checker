@@ -1,8 +1,35 @@
 # hotmail-checker
 
-Telegram bot that validates Microsoft/Hotmail session cookies in bulk and searches the inboxes that still work. Send cookies, get back the working ones as a file, a full report with account identity, and a keyword search across every live mailbox.
+Telegram bot that validates Microsoft/Hotmail session cookies in bulk and searches the inboxes that still work.
 
-Free for everyone. One Heroku Eco dyno. No database, no disk.
+Send cookies, get back the working ones as a file, a full report with account identity, and a keyword search across live mailboxes. Bring your own proxies so your checks run on your IPs.
+
+## Deploy
+
+**One click — no CLI needed:**
+
+[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/GT56GT/hotmail-checker)
+
+The button reads `app.json`, provisions an Eco worker dyno, and asks for `BOT_TOKEN`. That is the whole setup.
+
+**Or from this machine:**
+
+```bash
+brew tap heroku/brew && brew install heroku
+heroku login
+./deploy.sh                    # creates a new app
+./deploy.sh my-bot-name        # or deploys to an existing one
+```
+
+`deploy.sh` reads `BOT_TOKEN` from `.env`, sets config vars, pushes, scales the worker and tails the first boot.
+
+**Verify after deploy:**
+
+```bash
+heroku run --type=worker bin/hotmail-checker -selftest -a <app>
+```
+
+Expected: `verdict: dead` and `OK — TLS impersonation works and the endpoint answered.`
 
 ## Why this one works
 
@@ -21,28 +48,55 @@ paste cookies or upload .txt
   → report_<job>.txt    email, name, dead, challenged, errors
 ```
 
-Up to **2000 accounts per job**. Formats: raw header, JSON export, Netscape `cookies.txt`.
-Required cookies: `MSPAuth`, `MSPProf`, `ANON`.
+**No batch limit.** Send 10 or 10,000 — the only bound is the 20 MB upload cap. Formats: raw header, JSON export, Netscape `cookies.txt`. Required cookies: `MSPAuth`, `MSPProf`, `ANON`.
+
+## Your own proxies
+
+```
+/proxies add
+  → paste your list or upload a .txt
+```
+
+Every check and search for that user runs through their own proxies. No shared pool contention, no one else's rate limits.
+
+```
+/proxies list     see what's saved (credentials masked)
+/proxies test     reachability + latency per proxy
+/proxies del 3    remove one
+/proxies clear    start over
+```
+
+**All formats accepted, in one list:**
+
+```
+1.2.3.4:8080
+1.2.3.4:8080:user:pass
+user:pass@1.2.3.4:8080
+socks5://1.2.3.4:1080
+socks5://user:pass@1.2.3.4:1080
+http://1.2.3.4:8080
+https://1.2.3.4:8443
+[2001:db8::1]:8080
+```
+
+Separators: newlines, commas or semicolons. `#` lines are ignored. Up to 500 per user.
+
+**Persistence:** set `DATABASE_URL` (Neon or Supabase free tier) and lists survive restarts. Without it, they reset when the dyno restarts and the bot says so in `/stats`.
 
 ## Inbox search
 
 ```
 /search invoice
-  → bot arms the search
   → send cookies
   → check runs, then every live account is searched
   → search_<job>.txt
 ```
-
-Results per account: date, sender, subject, body preview, direct link.
 
 ```
 2026-11-20 14:32 | billing@vendor.com | Invoice #4491 — payment due
     Hi, attached is invoice 4491 for the period ending Nov 30…
     https://outlook.live.com/mail/0/inbox/id/...
 ```
-
-Only live accounts are searched, so dead cookies cost nothing. Capped at 20 accounts and 25 messages per account per job.
 
 Token chain: Graph Mail.Read → Outlook REST (Graph scope) → Outlook REST (mail scope). First one that answers wins, so accounts without Graph consent still return results.
 
@@ -52,55 +106,28 @@ Token chain: Graph Mail.Read → Outlook REST (Graph scope) → Outlook REST (ma
 |---|---|
 | `/start` | usage |
 | `/search <term>` | arm an inbox search, then send cookies |
-| `/cancel` | stop a running job, clear armed search |
+| `/proxies` | manage your proxy list |
+| `/cancel` | stop a running job |
 | `/stats` | service status |
-| `/proxies` | pool health (admin) |
-
-## Deploy
-
-```bash
-heroku create <app-name> --stack heroku-24
-heroku buildpacks:set heroku/go
-heroku config:set BOT_TOKEN=... ADMIN_IDS=...
-git push heroku main
-heroku ps:scale worker=1 web=0
-heroku run --type=worker bin/hotmail-checker -selftest
-```
-
-The selftest needs no token. It proves TLS impersonation reaches Microsoft, the check probe answers correctly, and the search path degrades cleanly.
-
-## Local
-
-```bash
-go build -o bin/hotmail-checker .
-./bin/hotmail-checker -selftest
-BOT_TOKEN=... ./bin/hotmail-checker
-```
-
-Endpoint diagnostics when Microsoft changes something:
-
-```bash
-go run ./tools/probe
-```
 
 ## Config
 
 | Var | Default | Purpose |
 |---|---|---|
 | `BOT_TOKEN` | — | required |
-| `ADMIN_IDS` | — | comma-separated |
-| `PROXY_LIST_URL` | — | remote proxy list |
-| `PROXY_LIST` | — | inline proxies |
+| `ADMIN_IDS` | — | admin Telegram IDs |
+| `DATABASE_URL` | — | proxy persistence (optional) |
+| `PROXY_LIST_URL` / `PROXY_LIST` | — | shared fallback pool |
 | `CHECK_CONCURRENCY` | 20 | goroutine workers |
-| `MAX_COOKIES_PER_JOB` | 2000 | per upload |
-| `MAX_SEARCH_ACCOUNTS` | 20 | mailbox searches per job |
-| `SEARCH_RESULTS_LIMIT` | 25 | messages per account |
-| `JOB_COOLDOWN_SECONDS` | 30 | per user |
+| `MAX_COOKIES_PER_JOB` | 0 | 0 = no limit |
+| `MAX_SEARCH_ACCOUNTS` | 20 | mailboxes searched per job |
+| `MAX_PROXIES_PER_USER` | 500 | per-user proxy cap |
+| `JOB_COOLDOWN_SECONDS` | 10 | between jobs |
 | `LOG_LEVEL` | info | |
 
 ## Cost
 
-$5/mo — one Eco worker. No Postgres, no Redis, no object storage.
+$5/mo — one Eco worker. No Postgres required. Neon's free tier covers proxy persistence at $0.
 
 ## Do not scale the worker
 

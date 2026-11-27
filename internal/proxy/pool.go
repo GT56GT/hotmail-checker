@@ -1,5 +1,3 @@
-// Package proxy maintains a rotating pool of outbound proxies with per-proxy
-// concurrency caps and automatic quarantine of failing entries.
 package proxy
 
 import (
@@ -8,9 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -74,6 +70,9 @@ func New(perProxy int) *Pool {
 
 // Len reports the number of loaded proxies.
 func (p *Pool) Len() int {
+	if p == nil {
+		return 0
+	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return len(p.entries)
@@ -81,6 +80,9 @@ func (p *Pool) Len() int {
 
 // Stats returns total and currently healthy counts.
 func (p *Pool) Stats() (total, healthy int) {
+	if p == nil {
+		return 0, 0
+	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	for _, e := range p.entries {
@@ -91,13 +93,15 @@ func (p *Pool) Stats() (total, healthy int) {
 	return len(p.entries), healthy
 }
 
-// Load replaces the pool contents.
+// Load replaces the pool contents. Entries are normalised; invalid ones are
+// skipped.
 func (p *Pool) Load(raw []string) {
 	seen := make(map[string]struct{}, len(raw))
 	entries := make([]*Entry, 0, len(raw))
+
 	for _, line := range raw {
-		u := normalise(line)
-		if u == "" {
+		u, err := Normalise(line)
+		if err != nil {
 			continue
 		}
 		if _, dup := seen[u]; dup {
@@ -136,17 +140,14 @@ func (p *Pool) Fetch(ctx context.Context, listURL string) error {
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		lines = append(lines, line)
+		lines = append(lines, sc.Text())
 	}
 	if err := sc.Err(); err != nil {
 		return err
 	}
 
-	p.Load(lines)
+	urls, _ := ParseList(strings.Join(lines, "\n"))
+	p.Load(urls)
 	slog.Info("proxy list refreshed", "count", p.Len())
 	return nil
 }
@@ -242,24 +243,4 @@ func (p *Pool) semaphore(key string) chan struct{} {
 	ch := make(chan struct{}, p.perProxy)
 	actual, _ := p.sems.LoadOrStore(key, ch)
 	return actual.(chan struct{})
-}
-
-func normalise(line string) string {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return ""
-	}
-	if !strings.Contains(line, "://") {
-		line = "http://" + line
-	}
-	u, err := url.Parse(line)
-	if err != nil || u.Host == "" {
-		return ""
-	}
-	if u.Port() == "" {
-		if _, _, err := net.SplitHostPort(u.Host); err != nil {
-			u.Host = net.JoinHostPort(u.Host, "8080")
-		}
-	}
-	return u.String()
 }

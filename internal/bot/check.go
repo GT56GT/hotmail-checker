@@ -37,6 +37,12 @@ func (b *Bot) onMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	}
 
 	text := strings.TrimSpace(m.Text)
+	p := b.takePending(user.Id)
+
+	if p.kind == pendingProxyAdd {
+		return b.saveProxies(bot, m, user.Id, text)
+	}
+
 	if !looksLikeCookie(text) {
 		_, err := m.Reply(bot, usageText, &gotgbot.SendMessageOpts{
 			ParseMode: "Markdown",
@@ -47,7 +53,11 @@ func (b *Bot) onMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return err
 	}
 
-	return b.startJob(bot, m, user.Id, text, b.takePending(user.Id))
+	term := ""
+	if p.kind == pendingSearch {
+		term = p.term
+	}
+	return b.startJob(bot, m, user.Id, text, term)
 }
 
 func (b *Bot) onDocument(bot *gotgbot.Bot, ctx *ext.Context) error {
@@ -60,7 +70,7 @@ func (b *Bot) onDocument(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return nil
 	}
 	if m.Document.FileSize > maxDocBytes {
-		_, err := m.Reply(bot, "File too large. Limit is 10 MB.", nil)
+		_, err := m.Reply(bot, "File too large. Limit is 20 MB.", nil)
 		return err
 	}
 
@@ -71,7 +81,16 @@ func (b *Bot) onDocument(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return rerr
 	}
 
-	return b.startJob(bot, m, user.Id, string(data), b.takePending(user.Id))
+	p := b.takePending(user.Id)
+	if p.kind == pendingProxyAdd {
+		return b.saveProxies(bot, m, user.Id, string(data))
+	}
+
+	term := ""
+	if p.kind == pendingSearch {
+		term = p.term
+	}
+	return b.startJob(bot, m, user.Id, string(data), term)
 }
 
 // startJob parses cookies, enforces limits, and runs the check. When term is
@@ -88,7 +107,8 @@ func (b *Bot) startJob(bot *gotgbot.Bot, m *gotgbot.Message, userID int64, text,
 		return err
 	}
 
-	if len(cookies) > b.cfg.MaxCookiesPerJob {
+	// A zero cap means no limit; the upload size is the only bound.
+	if b.cfg.MaxCookiesPerJob > 0 && len(cookies) > b.cfg.MaxCookiesPerJob {
 		_, err := m.Reply(bot, fmt.Sprintf(
 			"Too many accounts: %d. Limit is %d per job.", len(cookies), b.cfg.MaxCookiesPerJob), nil)
 		return err
@@ -181,7 +201,12 @@ func (b *Bot) checkOne(j *job.Job, ck *checker.Cookie) {
 	ctx, cancel := context.WithTimeout(j.Ctx, b.cfg.Timeout+10*time.Second)
 	defer cancel()
 
-	entry, release, err := b.pool.Acquire(ctx)
+	pool := b.pools.Pool(ctx, j.UserID)
+	entry, release, err := pool.Acquire(ctx)
+	if err != nil && pool != b.pools.Global() {
+		pool = b.pools.Global()
+		entry, release, err = pool.Acquire(ctx)
+	}
 	if err != nil {
 		j.AddErr("pool: " + err.Error())
 		return
@@ -192,7 +217,7 @@ func (b *Bot) checkOne(j *job.Job, ck *checker.Cookie) {
 
 	switch res.Verdict {
 	case checker.Live:
-		b.pool.Report(entry, true)
+		pool.Report(entry, true)
 		j.AddHit(job.Hit{
 			Email:   res.Email,
 			Name:    res.Name,
@@ -202,21 +227,21 @@ func (b *Bot) checkOne(j *job.Job, ck *checker.Cookie) {
 		})
 
 	case checker.Dead:
-		b.pool.Report(entry, true)
-		j.AddDead(*ck)
+		pool.Report(entry, true)
+		j.AddDead(ck.Label())
 
 	case checker.Challenged:
 		// The session authenticated but needs consent or re-auth, so the proxy
 		// is working — do not penalise it.
-		b.pool.Report(entry, true)
+		pool.Report(entry, true)
 		j.AddChallenged(res.Reason)
 
 	case checker.RateLimited:
-		b.pool.Report(entry, false)
+		pool.Report(entry, false)
 		j.AddErr("rate limited")
 
 	default:
-		b.pool.Report(entry, false)
+		pool.Report(entry, false)
 		j.AddErr(res.Reason)
 	}
 }
@@ -258,7 +283,12 @@ func (b *Bot) runSearches(bot *gotgbot.Bot, j *job.Job, status *gotgbot.Message,
 			ctx, cancel := context.WithTimeout(j.Ctx, b.cfg.Timeout+20*time.Second)
 			defer cancel()
 
-			entry, release, err := b.pool.Acquire(ctx)
+			pool := b.pools.Pool(ctx, j.UserID)
+			entry, release, err := pool.Acquire(ctx)
+			if err != nil && pool != b.pools.Global() {
+				pool = b.pools.Global()
+				entry, release, err = pool.Acquire(ctx)
+			}
 			if err != nil {
 				out[i] = searchOutcome{Email: h.Email, Reason: "pool: " + err.Error()}
 				return
@@ -390,7 +420,7 @@ func (b *Bot) downloadFile(fileID string) ([]byte, error) {
 
 	url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", b.client.Token, f.FilePath)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

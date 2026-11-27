@@ -16,12 +16,14 @@ type Config struct {
 	BannedIDs          []int64
 	ProxyListURL       string
 	Proxies            []string
+	DatabaseURL        string
 	Concurrency        int
 	Timeout            time.Duration
 	MaxCookiesPerJob   int
 	MaxSearchAccounts  int
 	SearchResultsLimit int
 	MaxSearchTermLen   int
+	MaxProxiesPerUser  int
 	Cooldown           time.Duration
 	ProxyRefresh       time.Duration
 	LogLevel           string
@@ -34,13 +36,15 @@ func Load() (*Config, error) {
 		BannedIDs:          envIDs("BANNED_IDS"),
 		ProxyListURL:       strings.TrimSpace(os.Getenv("PROXY_LIST_URL")),
 		Proxies:            envLines("PROXY_LIST"),
+		DatabaseURL:        strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		Concurrency:        envInt("CHECK_CONCURRENCY", 20),
 		Timeout:            time.Duration(envInt("CHECK_TIMEOUT", 30)) * time.Second,
-		MaxCookiesPerJob:   envInt("MAX_COOKIES_PER_JOB", 2000),
+		MaxCookiesPerJob:   envInt("MAX_COOKIES_PER_JOB", 0),
 		MaxSearchAccounts:  envInt("MAX_SEARCH_ACCOUNTS", 20),
 		SearchResultsLimit: envInt("SEARCH_RESULTS_LIMIT", 25),
 		MaxSearchTermLen:   envInt("MAX_SEARCH_TERM_LENGTH", 120),
-		Cooldown:           time.Duration(envInt("JOB_COOLDOWN_SECONDS", 30)) * time.Second,
+		MaxProxiesPerUser:  envInt("MAX_PROXIES_PER_USER", 500),
+		Cooldown:           time.Duration(envInt("JOB_COOLDOWN_SECONDS", 10)) * time.Second,
 		ProxyRefresh:       time.Duration(envInt("PROXY_REFRESH_MINUTES", 10)) * time.Minute,
 		LogLevel:           envStr("LOG_LEVEL", "info"),
 	}
@@ -55,8 +59,8 @@ func Load() (*Config, error) {
 	if cfg.Concurrency > 100 {
 		cfg.Concurrency = 100
 	}
-	if cfg.MaxCookiesPerJob < 1 {
-		cfg.MaxCookiesPerJob = 1
+	if cfg.MaxCookiesPerJob < 0 {
+		cfg.MaxCookiesPerJob = 0
 	}
 	if cfg.MaxSearchAccounts < 1 {
 		cfg.MaxSearchAccounts = 1
@@ -66,6 +70,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.MaxSearchTermLen < 8 {
 		cfg.MaxSearchTermLen = 8
+	}
+	if cfg.MaxProxiesPerUser < 1 {
+		cfg.MaxProxiesPerUser = 500
 	}
 	if cfg.Timeout < 5*time.Second {
 		cfg.Timeout = 5 * time.Second

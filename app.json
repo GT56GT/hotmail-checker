@@ -17,11 +17,15 @@
       "required": true
     },
     "ADMIN_IDS": {
-      "description": "Comma-separated Telegram numeric IDs with admin access",
+      "description": "Your Telegram numeric ID for admin commands (optional)",
+      "required": false
+    },
+    "DATABASE_URL": {
+      "description": "Optional Postgres URL so per-user proxy lists survive restarts. Neon or Supabase free tier works. Leave blank to keep them in memory only.",
       "required": false
     },
     "PROXY_LIST_URL": {
-      "description": "Remote proxy list URL, one proxy per line",
+      "description": "Optional shared proxy list URL everyone falls back to",
       "required": false
     },
     "CHECK_CONCURRENCY": {
@@ -30,18 +34,13 @@
       "required": false
     },
     "MAX_COOKIES_PER_JOB": {
-      "description": "Maximum accounts accepted per upload",
-      "value": "2000",
+      "description": "Accounts per upload. 0 means no limit.",
+      "value": "0",
       "required": false
     },
     "MAX_SEARCH_ACCOUNTS": {
       "description": "Live accounts searched per job",
       "value": "20",
-      "required": false
-    },
-    "SEARCH_RESULTS_LIMIT": {
-      "description": "Messages returned per searched account",
-      "value": "25",
       "required": false
     },
     "LOG_LEVEL": {
