@@ -122,7 +122,7 @@ func (in intake) serviceSummary() string {
 		return "unknown"
 	}
 	parts := make([]string, 0, len(in.services))
-	for _, name := range []string{"netflix", "microsoft"} {
+	for _, name := range []string{"netflix", "instagram", "microsoft"} {
 		if n, ok := in.services[name]; ok {
 			parts = append(parts, fmt.Sprintf("%s %d", displayName(name), n))
 		}
@@ -141,6 +141,8 @@ func displayName(name string) string {
 		return "Netflix"
 	case "microsoft":
 		return "Microsoft"
+	case "instagram":
+		return "Instagram"
 	}
 	return name
 }

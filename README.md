@@ -1,6 +1,6 @@
 # cookie-checker
 
-Telegram bot that validates session cookies in bulk and returns the ones that still work. Currently **Netflix** and **Microsoft/Hotmail**.
+Telegram bot that validates session cookies in bulk and returns the ones that still work. Currently **Netflix**, **Instagram** and **Microsoft/Hotmail**.
 
 Send cookies — or a ZIP of logs — and get back the working set, a per-account report, and a machine-readable bundle.
 
@@ -32,13 +32,50 @@ There is no `web` process — the bot polls Telegram, it does not serve HTTP.
 heroku ps:scale worker=1 -a <app>
 ```
 
-## Run Netflix only
+## Run one service only
 
 ```bash
 heroku config:set PROVIDERS=netflix -a <app>
 ```
 
-`PROVIDERS` is a comma list: `microsoft,netflix` (default), `netflix`, or `microsoft`. Detection is automatic — no command needed.
+`PROVIDERS` is a comma list: `microsoft,netflix,instagram` (default), or any subset. Detection is automatic — no command needed. Same binary, different token, different service.
+
+## Instagram
+
+Required cookies: `sessionid` · `ds_user_id` · `csrftoken`
+
+Two probe endpoints, measured against an invalid `sessionid` before this was written:
+
+```
+/api/v1/accounts/edit/web_form_data/   302 → /accounts/login/     dead
+/api/v1/accounts/current_user/         401 {"require_login":true}  dead
+/api/v1/users/web_profile_info/        404 html, gated behind login
+```
+
+The edit-form endpoint is primary because a dead session returns a clean redirect rather than a body that has to be sniffed. `current_user` is the JSON fallback.
+
+Reported per account:
+
+```
+### 1. jane_doe
+service : Instagram
+status  : live
+Username : jane_doe
+Full name : Jane Doe
+User ID : 123456789
+Followers : 1,500
+Following : 120
+Posts : 64
+Verified : Yes
+Business : No
+Private : No
+Email : jane@example.com
+Phone : +15551234567
+Bio : hello world
+proxy : 1.2.3.4:8080
+```
+
+A `403` without a login marker is treated as an edge block, not dead — Instagram blocks ranges and that says nothing about the cookie. `checkpoint_required` in the response is reported as `challenged`, not dead.
 
 ## Netflix
 
@@ -150,7 +187,7 @@ Set `DATABASE_URL` (Neon free tier) and lists persist across restarts.
 | Var | Default | Purpose |
 |---|---|---|
 | `BOT_TOKEN` | — | required |
-| `PROVIDERS` | microsoft,netflix | enabled services |
+| `PROVIDERS` | microsoft,netflix,instagram | enabled services |
 | `ADMIN_IDS` | — | admin Telegram IDs |
 | `DATABASE_URL` | — | proxy persistence |
 | `PROXY_LIST_URL` / `PROXY_LIST` | — | shared fallback pool |

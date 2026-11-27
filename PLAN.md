@@ -1,6 +1,6 @@
 # Cookie Checker — Go / Heroku
 
-Telegram bot that validates session cookies in bulk and returns the ones that still work. Two services today: **Netflix** and **Microsoft/Hotmail**. Adding a third means adding one package that satisfies an interface.
+Telegram bot that validates session cookies in bulk and returns the ones that still work. Three services today: **Netflix**, **Instagram** and **Microsoft/Hotmail**. Adding a fourth means adding one package that satisfies an interface.
 
 Free for everyone. One Heroku Eco worker dyno. No mandatory database.
 
@@ -28,11 +28,12 @@ Shared types live in `internal/provider`. `internal/checker` (Microsoft) and `in
 
 | Value | Behaviour |
 |---|---|
-| `microsoft,netflix` | default — auto-detects both |
+| `microsoft,netflix,instagram` | default — auto-detects all three |
 | `netflix` | Netflix-only bot |
+| `instagram` | Instagram-only bot |
 | `microsoft` | Hotmail-only bot |
 
-Detection runs in order, so a separate Netflix bot is the same binary with a different token and `PROVIDERS=netflix`.
+Detection runs in order, so a single-service bot is the same binary with a different token and `PROVIDERS` set. Mixed ZIPs work: each file is detected and tagged separately, and the report groups hits by service.
 
 ---
 
@@ -89,13 +90,53 @@ Formats accepted: raw header, JSON (flat or array-of-objects, filtered to netfli
 
 ---
 
-## 3. Microsoft / Hotmail
+## 3. Instagram
 
-### 3.1 TLS fingerprint
+### 3.1 Probe endpoints
+
+Measured against an invalid `sessionid` before the package was written:
+
+| Endpoint | Invalid session | Role |
+|---|---|---|
+| `/api/v1/accounts/edit/web_form_data/` | **302 → `/accounts/login/`** | **primary** |
+| `/api/v1/accounts/current_user/` | **401 `{"require_login":true}`** | fallback |
+| `/api/v1/users/web_profile_info/` | 404 html, `class="not-logged-in"` | stats only |
+| `www.instagram.com/` | 302 loop to itself | no |
+
+The edit-form endpoint is primary because a dead session yields a redirect, not a body that has to be sniffed. `current_user` returns JSON with an explicit `require_login` flag, so it covers the case where the form endpoint changes shape.
+
+### 3.2 Verdicts
+
+| Signal | Verdict |
+|---|---|
+| 302 → `/accounts/login` | DEAD |
+| 401, or 403 carrying `require_login` | DEAD |
+| 403 **without** a login marker | FAILED — edge block, not a cookie verdict |
+| 200 with `form_data` | LIVE |
+| `checkpoint_required` / `challenge_required` | CHALLENGED |
+| 429 | RATE_LIMITED |
+
+The 403 split matters. Instagram blocks datacenter ranges and answers with a generic failure body — counting that as dead produces false negatives on good cookies behind a bad proxy. Verified: `i.instagram.com/api/v1/accounts/current_user/?edit=true` returns `403 "We're sorry, but something went wrong"` for anything, even a valid-shaped request.
+
+### 3.3 Fields
+
+`form_data` carries username, full name, email, phone, biography and external link. `current_user` adds the numeric user id and account flags. `web_profile_info` adds follower, following and post counts plus verified/business/private — login-gated, so best effort.
+
+### 3.4 Headers
+
+Every API call sends `x-ig-app-id: 936619743392459`, `x-asbd-id: 198387` and `x-requested-with: XMLHttpRequest`. When present, the `csrftoken` cookie is echoed as `x-csrftoken` and `ds_user_id` as `ig-intended-user-id`.
+
+### 3.5 Cookie parsing
+
+Required: `sessionid`. `ds_user_id`, `csrftoken`, `mid`, `ig_did`, `datr` and `rur` are carried when present. JSON imports are filtered to instagram domains, so a mixed extension export cannot smuggle in another site's cookies.
+
+## 4. Microsoft / Hotmail
+
+### 4.1 TLS fingerprint
 
 Microsoft's edge inspects the ClientHello. `net/http` gets 403. Both providers use `bogdanfinn/tls-client` (uTLS, Chrome 124 profile, randomised extension order).
 
-### 3.2 The probe endpoint
+### 4.2 The probe endpoint
 
 `outlook.live.com/mail/0/inbox` **returns HTTP 200 with a login shell to everyone**, authenticated or not — measured at 14,150 bytes with a deliberately invalid cookie. A status-code checker reports every dead cookie as live.
 
@@ -109,7 +150,7 @@ Endpoints probed with an invalid cookie:
 | `substrate.office.com/profileb2/v2/me/V2` | **401** | identity |
 | `oauth20_authorize.srf?...&prompt=none` | **302 `#error=login_required`** | **primary** |
 
-### 3.3 Flow
+### 4.3 Flow
 
 ```
 GET silentOAuth (prompt=none)
@@ -121,7 +162,7 @@ GET silentOAuth (prompt=none)
 
 `challenged` is its own verdict: collapsing it into `dead` undercounts valid accounts, collapsing it into `live` hands out cookies that do not work.
 
-### 3.4 Inbox search
+### 4.4 Inbox search
 
 After a check, every live Microsoft account is searched (`MAX_SEARCH_ACCOUNTS=0` = all). Token chain, first to answer wins:
 
@@ -135,7 +176,7 @@ All four scopes return `login_required` rather than `invalid_scope` for the OAut
 
 ---
 
-## 4. Intake
+## 5. Intake
 
 One entry point for paste, text file and ZIP.
 
@@ -162,7 +203,7 @@ No batch limit. The 20 MB upload cap is the only bound.
 
 ---
 
-## 5. Output
+## 6. Output
 
 | File | Contents |
 |---|---|
@@ -191,7 +232,7 @@ PC login : https://www.netflix.com/browse?nftoken=…
 
 ---
 
-## 6. Proxies
+## 7. Proxies
 
 Each user can attach their own list. Their checks use it; the shared pool is a fallback.
 
@@ -228,7 +269,7 @@ Created on boot. Neon pooler URLs append `channel_binding=require`, which pgx fo
 
 ---
 
-## 7. Architecture
+## 8. Architecture
 
 ```
 Telegram ──long poll──► worker dyno (single process)
@@ -253,7 +294,7 @@ No hit archive. Telegram holds the delivered files.
 
 ---
 
-## 8. Dyno and cost
+## 9. Dyno and cost
 
 | Item | Plan | Monthly |
 |---|---|---|
@@ -267,7 +308,7 @@ One worker at 24/7 uses 720 of 1000 pooled hours.
 
 ---
 
-## 9. Project layout
+## 10. Project layout
 
 ```
 hotmail-checker/
@@ -279,6 +320,7 @@ hotmail-checker/
 │   ├── provider/               shared types + Checker interface
 │   ├── checker/                Microsoft: parse, identity, check, search
 │   ├── netflix/                Netflix: parse, extract, check, login links
+│   ├── instagram/              Instagram: parse, extract, check
 │   ├── archive/                zip extract/build with bomb limits
 │   ├── proxy/                  normaliser, pool, per-user manager
 │   ├── store/                  optional Postgres persistence
@@ -289,7 +331,7 @@ hotmail-checker/
 
 ---
 
-## 10. Deploy
+## 11. Deploy
 
 ```
 https://heroku.com/deploy?template=https://github.com/GT56GT/hotmail-checker
@@ -311,12 +353,14 @@ Expected: Microsoft `dead` / `session expired`, search `unavailable`, Netflix `d
 
 ---
 
-## 11. Known limits
+## 12. Known limits
 
 - **Restart drops jobs.** Users resend.
 - **Proxy lists persist only with `DATABASE_URL`.**
 - **Go 1.27 required** — `tls-client` and `fhttp` pin it.
 - **Netflix login links are private API.** They can break without warning; nothing else depends on them.
 - **Netflix markup shifts.** Extraction has regex fallbacks, but a full redesign could blank the plan/country fields while the live/dead verdict stays correct.
+- **Instagram stats need a live session.** `web_profile_info` is login-gated, so follower counts only resolve on live cookies; the verdict and identity come from the edit-form endpoint instead.
+- **Instagram challenges are not deaths.** `checkpoint_required` reports as `challenged` — the session is real but Instagram wants verification.
 - **Microsoft search depends on consent.** Accounts without Graph Mail.Read fall back to REST.
 - **No hit archive.** Telegram holds the delivered files.

@@ -28,8 +28,8 @@
       "required": false
     },
     "PROVIDERS": {
-      "description": "Enabled services: microsoft, netflix (comma separated). Use netflix alone for a Netflix-only bot.",
-      "value": "microsoft,netflix",
+      "description": "Enabled services: microsoft, netflix, instagram (comma separated). Use one alone for a single-service bot.",
+      "value": "microsoft,netflix,instagram",
       "required": false
     },
     "NF_LOGIN_LINKS": {

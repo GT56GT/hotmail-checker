@@ -16,6 +16,7 @@ import (
 	"github.com/GT56GT/hotmail-checker/internal/bot"
 	"github.com/GT56GT/hotmail-checker/internal/checker"
 	"github.com/GT56GT/hotmail-checker/internal/config"
+	"github.com/GT56GT/hotmail-checker/internal/instagram"
 	"github.com/GT56GT/hotmail-checker/internal/job"
 	"github.com/GT56GT/hotmail-checker/internal/netflix"
 	"github.com/GT56GT/hotmail-checker/internal/provider"
@@ -89,6 +90,8 @@ func main() {
 			nf := netflix.New(cfg.Timeout)
 			nf.LoginLinks = cfg.NFLoginLinks
 			checkers = append(checkers, nf)
+		case "instagram":
+			checkers = append(checkers, instagram.New(cfg.Timeout))
 		default:
 			slog.Warn("unknown provider, ignoring", "name", name)
 		}
@@ -166,6 +169,17 @@ func runSelftest() {
 	}}, "")
 	fmt.Printf("verdict: %s\nreason:  %s\nelapsed: %s\n",
 		nres.Verdict, orNone(nres.Reason), nres.Elapsed.Round(time.Millisecond))
+
+	// Instagram: an invalid sessionid must redirect to /accounts/login.
+	fmt.Println("\nissuing one Instagram check (expected: dead)…")
+	ig := instagram.New(25 * time.Second)
+	ires := ig.Check(ctx, &provider.Cookie{Values: map[string]string{
+		"sessionid":  "selftest-invalid",
+		"ds_user_id": "0",
+		"csrftoken":  "selftestcsrftoken",
+	}}, "")
+	fmt.Printf("verdict: %s\nreason:  %s\nelapsed: %s\n",
+		ires.Verdict, orNone(ires.Reason), ires.Elapsed.Round(time.Millisecond))
 }
 
 func orNone(s string) string {

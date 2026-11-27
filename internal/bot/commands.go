@@ -14,6 +14,7 @@ const usageText = `Send me session cookies and I'll tell you which ones still wo
 
 *Supported services*
 • *Netflix* — ` + "`NetflixId`" + ` · ` + "`SecureNetflixId`" + `
+• *Instagram* — ` + "`sessionid`" + ` · ` + "`ds_user_id`" + ` · ` + "`csrftoken`" + `
 • *Microsoft / Hotmail* — ` + "`MSPAuth`" + ` · ` + "`MSPProf`" + ` · ` + "`ANON`" + `
 
 The service is detected from the cookies — no command needed.
@@ -30,7 +31,10 @@ The service is detected from the cookies — no command needed.
 • ` + "`results_<id>.zip`" + ` — report, cookies, accounts.csv, dead.txt
 
 *Netflix detail*
-Plan, quality, screens, price, next billing, member since, country, profiles, payment method, payment hold — and on a live hit, one-click PC / TV / phone login links.
+Plan, quality, screens, price, next billing, member since, country, profiles, payment — and on a live hit, one-click PC / TV / phone login links.
+
+*Instagram detail*
+Username, full name, followers, following, posts, verified, business, private, email, phone, bio, link.
 
 *Microsoft detail*
 Account email, display name, plus optional inbox search.

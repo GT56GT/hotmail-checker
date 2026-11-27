@@ -46,7 +46,7 @@ func Load() (*Config, error) {
 		SearchResultsLimit: envInt("SEARCH_RESULTS_LIMIT", 25),
 		MaxSearchTermLen:   envInt("MAX_SEARCH_TERM_LENGTH", 120),
 		MaxProxiesPerUser:  envInt("MAX_PROXIES_PER_USER", 500),
-		Providers:          envList("PROVIDERS", []string{"microsoft", "netflix"}),
+		Providers:          envList("PROVIDERS", []string{"microsoft", "netflix", "instagram"}),
 		NFLoginLinks:       envBool("NF_LOGIN_LINKS", true),
 		Cooldown:           time.Duration(envInt("JOB_COOLDOWN_SECONDS", 10)) * time.Second,
 		ProxyRefresh:       time.Duration(envInt("PROXY_REFRESH_MINUTES", 10)) * time.Minute,
