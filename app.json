@@ -2,17 +2,13 @@
   "name": "hotmail-checker",
   "description": "Hotmail cookie validator - Telegram bot",
   "repository": "https://github.com/GT56GT/hotmail-checker",
-  "logo": "",
-  "keywords": ["telegram", "bot", "checker", "python", "asyncio"],
+  "keywords": ["telegram", "bot", "checker", "go", "tls"],
   "stack": "heroku-24",
   "buildpacks": [
-    { "url": "heroku/python" }
-  ],
-  "addons": [
-    { "plan": "heroku-postgresql:essential-0" }
+    { "url": "heroku/go" }
   ],
   "formation": {
-    "worker": { "quantity": 1, "size": "basic" },
+    "worker": { "quantity": 1, "size": "eco" },
     "web": { "quantity": 0 }
   },
   "env": {
@@ -22,25 +18,25 @@
     },
     "ADMIN_IDS": {
       "description": "Comma-separated Telegram numeric IDs with admin access",
-      "required": true
+      "required": false
     },
     "PROXY_LIST_URL": {
-      "description": "Optional remote proxy list URL",
+      "description": "Remote proxy list URL, one proxy per line",
       "required": false
     },
     "CHECK_CONCURRENCY": {
       "description": "Concurrent checks per worker",
-      "value": "10",
+      "value": "20",
       "required": false
     },
-    "DEFAULT_CREDITS": {
-      "description": "Credits granted on signup",
-      "value": "10",
+    "MAX_COOKIES_PER_JOB": {
+      "description": "Maximum accounts accepted per upload",
+      "value": "500",
       "required": false
     },
     "LOG_LEVEL": {
-      "description": "Logging verbosity",
-      "value": "INFO",
+      "description": "debug | info | warn | error",
+      "value": "info",
       "required": false
     }
   }
