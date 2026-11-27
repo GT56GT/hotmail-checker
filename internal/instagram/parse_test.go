@@ -1,6 +1,12 @@
 package instagram
 
-import "testing"
+import (
+	"testing"
+
+	fhttp "github.com/bogdanfinn/fhttp"
+
+	"github.com/GT56GT/hotmail-checker/internal/provider"
+)
 
 func TestDetect(t *testing.T) {
 	if !Detect("sessionid=abc; ds_user_id=123") {
@@ -177,5 +183,49 @@ func TestAsMetaSkipsEmpty(t *testing.T) {
 	}
 	if _, ok := m["Email"]; ok {
 		t.Error("empty email should be omitted")
+	}
+}
+
+func TestJudge(t *testing.T) {
+	login := &fhttp.Response{
+		StatusCode: 302,
+		Header:     fhttp.Header{"Location": {"https://www.instagram.com/accounts/login/?next=/api/v1/x"}},
+	}
+	if v, reason, final := judge(login, nil); !final || v != provider.Dead {
+		t.Errorf("login redirect: v=%v reason=%q final=%v", v, reason, final)
+	}
+
+	elsewhere := &fhttp.Response{
+		StatusCode: 302,
+		Header:     fhttp.Header{"Location": {"https://www.instagram.com/"}},
+	}
+	if v, _, final := judge(elsewhere, nil); !final || v != provider.Dead {
+		t.Errorf("unexpected redirect: v=%v final=%v", v, final)
+	}
+
+	if v, _, _ := judge(&fhttp.Response{StatusCode: 401}, nil); v != provider.Dead {
+		t.Errorf("401 = %v, want dead", v)
+	}
+
+	blocked := &fhttp.Response{StatusCode: 403}
+	if v, _, _ := judge(blocked, []byte(`{"message":"something went wrong"}`)); v != provider.Failed {
+		t.Errorf("403 without marker = %v, want failed", v)
+	}
+	if v, _, _ := judge(blocked, []byte(`{"require_login":true}`)); v != provider.Dead {
+		t.Errorf("403 with require_login = %v, want dead", v)
+	}
+
+	if v, _, _ := judge(&fhttp.Response{StatusCode: 429}, nil); v != provider.RateLimited {
+		t.Errorf("429 = %v, want rate-limited", v)
+	}
+
+	if v, _, _ := judge(&fhttp.Response{StatusCode: 200}, []byte(`{"message":"checkpoint_required"}`)); v != provider.Challenged {
+		t.Errorf("checkpoint = %v, want challenged", v)
+	}
+
+	for _, code := range []int{400, 404, 500, 503} {
+		if _, _, final := judge(&fhttp.Response{StatusCode: code}, nil); final {
+			t.Errorf("%d should be inconclusive so the fallback runs", code)
+		}
 	}
 }

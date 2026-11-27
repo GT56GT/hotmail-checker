@@ -20,7 +20,8 @@ const (
 	// formURL is the primary probe: a dead session redirects to /accounts/login.
 	formURL = "https://www.instagram.com/api/v1/accounts/edit/web_form_data/"
 
-	// currentURL is the JSON fallback: 401 with require_login when invalid.
+	// currentURL is the JSON fallback: 401 with require_login when invalid,
+	// and a login redirect when Instagram is behind a different edge.
 	currentURL = "https://www.instagram.com/api/v1/accounts/current_user/"
 
 	// profileURL adds follower counts and flags. Login-gated, so best effort.
@@ -54,6 +55,11 @@ func (c *Checker) ParseBlock(text string) ([]*provider.Cookie, []error) {
 }
 
 // Check validates one Instagram cookie set.
+//
+// Both endpoints are judged by the same rule set. The primary is tried first
+// because a dead session there yields a redirect, which needs no body sniffing.
+// Anything inconclusive (400/404/5xx) falls through to the JSON endpoint rather
+// than being reported as an error.
 func (c *Checker) Check(ctx context.Context, ck *provider.Cookie, proxyURL string) (res provider.Result) {
 	start := time.Now()
 	res.Proxy = proxyLabel(proxyURL)
@@ -67,7 +73,7 @@ func (c *Checker) Check(ctx context.Context, ck *provider.Cookie, proxyURL strin
 		return res
 	}
 
-	// --- primary: the edit form endpoint --------------------------------
+	// --- primary ---------------------------------------------------------
 	resp, body, err := c.get(ctx, client, formURL, ck)
 	if err != nil {
 		res.Verdict = provider.Failed
@@ -75,60 +81,23 @@ func (c *Checker) Check(ctx context.Context, ck *provider.Cookie, proxyURL strin
 		return res
 	}
 
-	switch {
-	case resp.StatusCode == fhttp.StatusTooManyRequests:
-		res.Verdict = provider.RateLimited
-		res.Reason = "rate limited"
-		return res
-
-	case resp.StatusCode >= 300 && resp.StatusCode < 400:
-		loc := resp.Header.Get("Location")
-		if isLoginURL(loc) {
-			res.Verdict = provider.Dead
-			res.Reason = "session expired"
-			return res
-		}
-		if isCheckpoint(body) || isCheckpoint([]byte(loc)) {
-			res.Verdict = provider.Challenged
-			res.Reason = "challenge: checkpoint required"
-			return res
-		}
-		res.Verdict = provider.Dead
-		res.Reason = "redirected to " + shorten(loc, 60)
-		return res
-
-	case resp.StatusCode == fhttp.StatusOK:
+	if resp.StatusCode == fhttp.StatusOK {
 		if isCheckpoint(body) {
 			res.Verdict = provider.Challenged
 			res.Reason = "challenge: checkpoint required"
 			return res
 		}
-		d, ok := parseFormData(body)
-		if !ok {
-			// 200 but no form data: fall through to the JSON probe.
-			break
+		if d, ok := parseFormData(body); ok {
+			return c.live(ctx, client, res, d, ck)
 		}
-		c.enrich(ctx, client, &d, ck)
-		res.Verdict = provider.Live
-		res.Email = d.Email
-		res.Name = firstNonEmpty(d.FullName, d.Username)
-		res.Meta = d.asMeta()
-		return res
-
-	case resp.StatusCode == fhttp.StatusUnauthorized || resp.StatusCode == fhttp.StatusForbidden:
-		if !requiresLogin(body) && resp.StatusCode == fhttp.StatusForbidden {
-			// 403 without a login marker is Instagram's generic block, not a
-			// verdict on the cookie.
-			res.Verdict = provider.Failed
-			res.Reason = "403 forbidden (edge block)"
-			return res
-		}
-		res.Verdict = provider.Dead
-		res.Reason = "session expired"
+		// 200 without form data is not a verdict — try the JSON endpoint.
+	} else if v, reason, final := judge(resp, body); final {
+		res.Verdict = v
+		res.Reason = reason
 		return res
 	}
 
-	// --- fallback: current_user JSON ------------------------------------
+	// --- fallback --------------------------------------------------------
 	resp2, body2, err := c.get(ctx, client, currentURL, ck)
 	if err != nil {
 		res.Verdict = provider.Failed
@@ -136,12 +105,7 @@ func (c *Checker) Check(ctx context.Context, ck *provider.Cookie, proxyURL strin
 		return res
 	}
 
-	switch {
-	case resp2.StatusCode == fhttp.StatusTooManyRequests:
-		res.Verdict = provider.RateLimited
-		res.Reason = "rate limited"
-
-	case resp2.StatusCode == fhttp.StatusOK:
+	if resp2.StatusCode == fhttp.StatusOK {
 		if isCheckpoint(body2) {
 			res.Verdict = provider.Challenged
 			res.Reason = "challenge: checkpoint required"
@@ -151,32 +115,63 @@ func (c *Checker) Check(ctx context.Context, ck *provider.Cookie, proxyURL strin
 		if !ok {
 			d, ok = parseFormData(body2)
 		}
-		if !ok {
-			res.Verdict = provider.Failed
-			res.Reason = "http 200 without account data"
-			return res
-		}
-		c.enrich(ctx, client, &d, ck)
-		res.Verdict = provider.Live
-		res.Email = d.Email
-		res.Name = firstNonEmpty(d.FullName, d.Username)
-		res.Meta = d.asMeta()
-
-	case resp2.StatusCode == fhttp.StatusUnauthorized || resp2.StatusCode == fhttp.StatusForbidden:
-		if requiresLogin(body2) || resp2.StatusCode == fhttp.StatusUnauthorized {
-			res.Verdict = provider.Dead
-			res.Reason = "session expired"
-			return res
+		if ok {
+			return c.live(ctx, client, res, d, ck)
 		}
 		res.Verdict = provider.Failed
-		res.Reason = "403 forbidden (edge block)"
-
-	default:
-		res.Verdict = provider.Failed
-		res.Reason = fmt.Sprintf("http %d", resp2.StatusCode)
+		res.Reason = "http 200 without account data"
+		return res
 	}
 
+	res.Verdict, res.Reason, _ = judge(resp2, body2)
 	return res
+}
+
+// live finishes a successful check: enrichment plus a populated result.
+func (c *Checker) live(ctx context.Context, client tls_client.HttpClient, res provider.Result, d detail, ck *provider.Cookie) provider.Result {
+	c.enrich(ctx, client, &d, ck)
+
+	res.Verdict = provider.Live
+	res.Email = d.Email
+	res.Name = firstNonEmpty(d.FullName, d.Username)
+	res.Meta = d.asMeta()
+	return res
+}
+
+// judge classifies a non-200 response. final reports whether the answer is
+// conclusive; false means the other endpoint should be tried before deciding.
+func judge(resp *fhttp.Response, body []byte) (v provider.Verdict, reason string, final bool) {
+	switch {
+	case resp.StatusCode == fhttp.StatusTooManyRequests:
+		return provider.RateLimited, "rate limited", true
+
+	case resp.StatusCode >= 300 && resp.StatusCode < 400:
+		loc := resp.Header.Get("Location")
+		if isCheckpoint(body) || isCheckpoint([]byte(loc)) {
+			return provider.Challenged, "challenge: checkpoint required", true
+		}
+		if isLoginURL(loc) {
+			return provider.Dead, "session expired", true
+		}
+		return provider.Dead, "redirected to " + shorten(loc, 60), true
+
+	case resp.StatusCode == fhttp.StatusUnauthorized:
+		return provider.Dead, "session expired", true
+
+	case resp.StatusCode == fhttp.StatusForbidden:
+		if requiresLogin(body) {
+			return provider.Dead, "session expired", true
+		}
+		// Instagram blocks datacenter ranges with a generic body. That is a
+		// statement about the network, not the cookie.
+		return provider.Failed, "403 forbidden (edge block)", true
+
+	case isCheckpoint(body):
+		return provider.Challenged, "challenge: checkpoint required", true
+	}
+
+	// 400 / 404 / 5xx — inconclusive.
+	return provider.Failed, fmt.Sprintf("http %d", resp.StatusCode), false
 }
 
 // enrich adds follower counts and account flags from the profile endpoint.
@@ -275,6 +270,8 @@ func classifyNetErr(err error) string {
 		return "timeout"
 	case strings.Contains(s, "proxy"):
 		return "proxy failure"
+	case strings.Contains(s, "invalid http") || strings.Contains(s, "malformed"):
+		return "malformed HTTP response (bad proxy)"
 	case strings.Contains(s, "tls") || strings.Contains(s, "handshake"):
 		return "tls failure"
 	case strings.Contains(s, "no such host") || strings.Contains(s, "dns"):

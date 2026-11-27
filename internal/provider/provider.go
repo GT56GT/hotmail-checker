@@ -58,15 +58,31 @@ func (c *Cookie) Header() string {
 	sort.Strings(keys)
 
 	var sb strings.Builder
-	for i, k := range keys {
-		if i > 0 {
+	for _, k := range keys {
+		name := sanitiseToken(k)
+		if name == "" {
+			continue
+		}
+		if sb.Len() > 0 {
 			sb.WriteString("; ")
 		}
-		sb.WriteString(k)
+		sb.WriteString(name)
 		sb.WriteByte('=')
-		sb.WriteString(c.Values[k])
+		sb.WriteString(sanitiseToken(c.Values[k]))
 	}
 	return sb.String()
+}
+
+// sanitiseToken strips control characters that would produce an invalid HTTP
+// header. Pasted cookie dumps occasionally arrive with embedded newlines or
+// other junk, and an invalid header kills the whole request.
+func sanitiseToken(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // Has reports whether a cookie name is present and non-empty.
