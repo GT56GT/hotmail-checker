@@ -10,32 +10,36 @@ import (
 	"github.com/PaulSonOfLars/gotgbot/v2/ext"
 )
 
-const usageText = `Send me Microsoft cookies and I'll tell you which ones still work.
+const usageText = `Send me session cookies and I'll tell you which ones still work.
+
+*Supported services*
+• *Netflix* — ` + "`NetflixId`" + ` · ` + "`SecureNetflixId`" + `
+• *Microsoft / Hotmail* — ` + "`MSPAuth`" + ` · ` + "`MSPProf`" + ` · ` + "`ANON`" + `
+
+The service is detected from the cookies — no command needed.
 
 *How to send*
 • Paste cookie string(s), one account per line
 • Upload a .txt file
-• Upload a .zip of logs — every file inside is parsed and merged
-• No batch limit — send as many as you want
+• Upload a .zip of logs — every file inside is parsed, merged and deduplicated
+• No batch limit
 
-*Accepted formats*
-• Raw header — ` + "`MSPAuth=…; MSPProf=…; ANON=…`" + `
-• JSON export — ` + "`{\"MSPAuth\":\"…\", …}`" + `
-• Netscape cookies.txt — one file per account
+*What you get back*
+• ` + "`cookies_<id>.txt`" + ` — working cookies only
+• ` + "`report_<id>.txt`" + ` — per-account detail
+• ` + "`results_<id>.zip`" + ` — report, cookies, accounts.csv, dead.txt
 
-*Required cookies*
-MSPAuth · MSPProf · ANON
+*Netflix detail*
+Plan, quality, screens, price, next billing, member since, country, profiles, payment method, payment hold — and on a live hit, one-click PC / TV / phone login links.
 
-*Inbox search*
-` + "`/search invoice`" + ` — then send cookies or a zip to search every live account's inbox for that keyword.
+*Microsoft detail*
+Account email, display name, plus optional inbox search.
+
+*Inbox search (Microsoft only)*
+` + "`/search invoice`" + ` — then send cookies or a zip.
 
 *Your own proxies*
-` + "`/proxies add`" + ` — then paste your list. All formats accepted.
-
-*You get back*
-• ` + "`cookies_<id>.txt`" + ` — working cookies only
-• ` + "`report_<id>.txt`" + ` — per-account detail with search matches
-• ` + "`results_<id>.zip`" + ` — report, cookies, accounts.csv, dead.txt, search.csv
+` + "`/proxies add`" + ` — paste your list, all formats accepted.
 
 *Commands*
 /start — this message
@@ -108,8 +112,11 @@ func (b *Bot) cmdSearch(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if idx := strings.IndexByte(body, '\n'); idx >= 0 {
 		term := strings.TrimSpace(body[:idx])
 		rest := strings.TrimSpace(body[idx+1:])
-		if term != "" && looksLikeCookie(rest) {
-			return b.startJob(bot, m, user.Id, parseIntake("pasted", []byte(rest)), term)
+		if term != "" && rest != "" {
+			in := parseIntake("pasted", []byte(rest), b.checkers)
+			if len(in.cookies) > 0 {
+				return b.startJob(bot, m, user.Id, in, term)
+			}
 		}
 	}
 

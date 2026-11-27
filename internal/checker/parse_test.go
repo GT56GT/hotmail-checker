@@ -5,7 +5,7 @@ import "testing"
 const rawCookie = "Cookie: MSPAuth=ABC123; MSPProf=DEF456; ANON=GHI789; NAP=1; SUBP=2"
 
 func TestParseRaw(t *testing.T) {
-	cookies, issues := ParseBlock(rawCookie)
+	cookies, issues := ParseCookies(rawCookie)
 	if len(issues) != 0 {
 		t.Fatalf("unexpected issues: %v", issues)
 	}
@@ -23,7 +23,7 @@ func TestParseRaw(t *testing.T) {
 
 func TestParseMultiLine(t *testing.T) {
 	input := "MSPAuth=A; MSPProf=B; ANON=C\nMSPAuth=D; MSPProf=E; ANON=F\n"
-	cookies, issues := ParseBlock(input)
+	cookies, issues := ParseCookies(input)
 	if len(issues) != 0 {
 		t.Fatalf("unexpected issues: %v", issues)
 	}
@@ -37,7 +37,7 @@ func TestParseMultiLine(t *testing.T) {
 
 func TestParseJSONMap(t *testing.T) {
 	input := `{"MSPAuth":"A","MSPProf":"B","ANON":"C"}`
-	cookies, issues := ParseBlock(input)
+	cookies, issues := ParseCookies(input)
 	if len(issues) != 0 {
 		t.Fatalf("unexpected issues: %v", issues)
 	}
@@ -48,7 +48,7 @@ func TestParseJSONMap(t *testing.T) {
 
 func TestParseJSONArray(t *testing.T) {
 	input := `[{"name":"MSPAuth","value":"A"},{"name":"MSPProf","value":"B"},{"name":"ANON","value":"C"}]`
-	cookies, issues := ParseBlock(input)
+	cookies, issues := ParseCookies(input)
 	if len(issues) != 0 {
 		t.Fatalf("unexpected issues: %v", issues)
 	}
@@ -65,7 +65,7 @@ func TestParseNetscape(t *testing.T) {
 		".live.com\tTRUE\t/\tTRUE\t1800000000\tMSPAuth\tA\n" +
 		".live.com\tTRUE\t/\tTRUE\t1800000000\tMSPProf\tB\n" +
 		".live.com\tTRUE\t/\tTRUE\t1800000000\tANON\tC\n"
-	cookies, issues := ParseBlock(input)
+	cookies, issues := ParseCookies(input)
 	if len(issues) != 0 {
 		t.Fatalf("unexpected issues: %v", issues)
 	}
@@ -81,7 +81,7 @@ func TestParseNetscape(t *testing.T) {
 }
 
 func TestMissingRequired(t *testing.T) {
-	cookies, issues := ParseBlock("MSPAuth=A; MSPProf=B")
+	cookies, issues := ParseCookies("MSPAuth=A; MSPProf=B")
 	if len(cookies) != 0 {
 		t.Fatalf("want 0 cookies, got %d", len(cookies))
 	}
@@ -91,7 +91,7 @@ func TestMissingRequired(t *testing.T) {
 }
 
 func TestHeaderRoundTrip(t *testing.T) {
-	cookies, _ := ParseBlock(rawCookie)
+	cookies, _ := ParseCookies(rawCookie)
 	h := cookies[0].Header()
 	for _, want := range []string{"MSPAuth=ABC123", "MSPProf=DEF456", "ANON=GHI789"} {
 		if !contains(h, want) {

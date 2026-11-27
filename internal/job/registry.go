@@ -20,11 +20,13 @@ var (
 
 // Hit is one validated account.
 type Hit struct {
-	Email   string
-	Name    string
-	Cookie  string
-	Cookies map[string]string
-	Proxy   string
+	Provider string
+	Email    string
+	Name     string
+	Cookie   string
+	Cookies  map[string]string
+	Proxy    string
+	Meta     map[string]string
 }
 
 // Counts is an immutable snapshot of a job's progress.

@@ -27,6 +27,8 @@ import (
 	fhttp "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
+
+	"github.com/GT56GT/hotmail-checker/internal/provider"
 )
 
 const (
@@ -62,40 +64,31 @@ var (
 	errRateLimited   = errors.New("rate limited")
 )
 
-// Verdict is the outcome of a single check.
-type Verdict int
+// Verdict and Result are shared with every other provider.
+type Verdict = provider.Verdict
 
 const (
-	Live Verdict = iota
-	Dead
-	Challenged // session valid but requires consent or re-authentication
-	RateLimited
-	Failed
+	Live        = provider.Live
+	Dead        = provider.Dead
+	Challenged  = provider.Challenged
+	RateLimited = provider.RateLimited
+	Failed      = provider.Failed
 )
 
-func (v Verdict) String() string {
-	switch v {
-	case Live:
-		return "live"
-	case Dead:
-		return "dead"
-	case Challenged:
-		return "challenged"
-	case RateLimited:
-		return "rate-limited"
-	default:
-		return "error"
-	}
-}
+type Result = provider.Result
 
-// Result carries everything the bot needs to report one cookie.
-type Result struct {
-	Verdict Verdict
-	Email   string
-	Name    string
-	Reason  string
-	Proxy   string
-	Elapsed time.Duration
+// Name implements provider.Checker.
+func (c *Checker) Name() string { return "microsoft" }
+
+// Label implements provider.Checker.
+func (c *Checker) Label() string { return "Microsoft" }
+
+// Detect implements provider.Checker.
+func (c *Checker) Detect(text string) bool { return Detect(text) }
+
+// ParseBlock implements provider.Checker.
+func (c *Checker) ParseBlock(text string) ([]*provider.Cookie, []error) {
+	return ParseCookies(text)
 }
 
 // Checker runs checks against a shared, proxy-keyed client pool.

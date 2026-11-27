@@ -27,6 +27,16 @@
       "description": "Optional shared proxy list URL everyone falls back to",
       "required": false
     },
+    "PROVIDERS": {
+      "description": "Enabled services: microsoft, netflix (comma separated). Use netflix alone for a Netflix-only bot.",
+      "value": "microsoft,netflix",
+      "required": false
+    },
+    "NF_LOGIN_LINKS": {
+      "description": "Generate one-click Netflix login links for live cookies",
+      "value": "true",
+      "required": false
+    },
     "CHECK_CONCURRENCY": {
       "description": "Concurrent checks per worker",
       "value": "20",

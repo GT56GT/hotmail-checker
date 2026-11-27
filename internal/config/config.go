@@ -24,6 +24,8 @@ type Config struct {
 	SearchResultsLimit int
 	MaxSearchTermLen   int
 	MaxProxiesPerUser  int
+	Providers          []string
+	NFLoginLinks       bool
 	Cooldown           time.Duration
 	ProxyRefresh       time.Duration
 	LogLevel           string
@@ -44,6 +46,8 @@ func Load() (*Config, error) {
 		SearchResultsLimit: envInt("SEARCH_RESULTS_LIMIT", 25),
 		MaxSearchTermLen:   envInt("MAX_SEARCH_TERM_LENGTH", 120),
 		MaxProxiesPerUser:  envInt("MAX_PROXIES_PER_USER", 500),
+		Providers:          envList("PROVIDERS", []string{"microsoft", "netflix"}),
+		NFLoginLinks:       envBool("NF_LOGIN_LINKS", true),
 		Cooldown:           time.Duration(envInt("JOB_COOLDOWN_SECONDS", 10)) * time.Second,
 		ProxyRefresh:       time.Duration(envInt("PROXY_REFRESH_MINUTES", 10)) * time.Minute,
 		LogLevel:           envStr("LOG_LEVEL", "info"),
@@ -97,6 +101,38 @@ func (c *Config) IsBanned(id int64) bool {
 		}
 	}
 	return false
+}
+
+func envBool(key string, def bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	return def
+}
+
+// envList reads a comma or whitespace separated list.
+func envList(key string, def []string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	raw = strings.ReplaceAll(raw, ";", ",")
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.ToLower(strings.TrimSpace(part))
+		if part == "" {
+			continue
+		}
+		out = append(out, part)
+	}
+	if len(out) == 0 {
+		return def
+	}
+	return out
 }
 
 func envStr(key, def string) string {

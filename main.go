@@ -17,6 +17,8 @@ import (
 	"github.com/GT56GT/hotmail-checker/internal/checker"
 	"github.com/GT56GT/hotmail-checker/internal/config"
 	"github.com/GT56GT/hotmail-checker/internal/job"
+	"github.com/GT56GT/hotmail-checker/internal/netflix"
+	"github.com/GT56GT/hotmail-checker/internal/provider"
 	"github.com/GT56GT/hotmail-checker/internal/proxy"
 	"github.com/GT56GT/hotmail-checker/internal/store"
 )
@@ -77,9 +79,26 @@ func main() {
 	}
 
 	reg := job.NewRegistry(cfg.Cooldown)
-	chk := checker.New(cfg.Timeout, cfg.Concurrency)
 
-	b, err := bot.New(cfg, chk, pools, reg)
+	var checkers []provider.Checker
+	for _, name := range cfg.Providers {
+		switch name {
+		case "microsoft":
+			checkers = append(checkers, checker.New(cfg.Timeout, cfg.Concurrency))
+		case "netflix":
+			nf := netflix.New(cfg.Timeout)
+			nf.LoginLinks = cfg.NFLoginLinks
+			checkers = append(checkers, nf)
+		default:
+			slog.Warn("unknown provider, ignoring", "name", name)
+		}
+	}
+	if len(checkers) == 0 {
+		slog.Error("no providers enabled — set PROVIDERS", "value", cfg.Providers)
+		os.Exit(1)
+	}
+
+	b, err := bot.New(cfg, checkers, pools, reg)
 	if err != nil {
 		slog.Error("bot init", "err", err)
 		os.Exit(1)
@@ -136,6 +155,17 @@ func runSelftest() {
 	sres := chk.Search(ctx, ck, "", "invoice", 5)
 	fmt.Printf("method: %s\nitems:  %d\nreason: %s\nelapsed: %s\n",
 		orNone(sres.Method), len(sres.Items), orNone(sres.Reason), sres.Elapsed.Round(time.Millisecond))
+
+	// Netflix: an invalid cookie must land on /login and read as dead.
+	fmt.Println("\nissuing one Netflix check (expected: dead)…")
+	nf := netflix.New(25 * time.Second)
+	nf.LoginLinks = false
+	nres := nf.Check(ctx, &provider.Cookie{Values: map[string]string{
+		"NetflixId":       "selftest-invalid",
+		"SecureNetflixId": "selftest-invalid",
+	}}, "")
+	fmt.Printf("verdict: %s\nreason:  %s\nelapsed: %s\n",
+		nres.Verdict, orNone(nres.Reason), nres.Elapsed.Round(time.Millisecond))
 }
 
 func orNone(s string) string {

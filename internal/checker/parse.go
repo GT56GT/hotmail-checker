@@ -3,59 +3,32 @@ package checker
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
+
+	"github.com/GT56GT/hotmail-checker/internal/provider"
 )
 
+// Cookie is the shared provider type.
+type Cookie = provider.Cookie
+
 // Required lists the cookies a Microsoft session must carry to authenticate.
-// Without these the check is wasted work, so they are validated up front.
 var Required = []string{"MSPAuth", "MSPProf", "ANON"}
 
-// Cookie is one account's cookie set.
-type Cookie struct {
-	Values map[string]string
-	Raw    string
-	Format string // raw | netscape | json
-}
+// markers identify a Microsoft consumer session in free-form text.
+var markers = []string{"MSPAuth", "MSPProf", "__Host-MSAAUTHP", "RPSSecAuth"}
 
-// Header renders the set as an HTTP Cookie header value.
-func (c *Cookie) Header() string {
-	keys := make([]string, 0, len(c.Values))
-	for k := range c.Values {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var sb strings.Builder
-	for i, k := range keys {
-		if i > 0 {
-			sb.WriteString("; ")
-		}
-		sb.WriteString(k)
-		sb.WriteByte('=')
-		sb.WriteString(c.Values[k])
-	}
-	return sb.String()
-}
-
-// Has reports whether a cookie name is present and non-empty.
-func (c *Cookie) Has(name string) bool {
-	v, ok := c.Values[name]
-	return ok && strings.TrimSpace(v) != ""
-}
-
-// Label returns the best available human identifier for the set.
-func (c *Cookie) Label() string {
-	for _, k := range []string{"__Host-MSAAUTHP", "MSPAuth", "RPSSecAuth"} {
-		if v := c.Values[k]; len(v) > 12 {
-			return v[:12] + "…"
+// Detect reports whether text looks like a Microsoft cookie block.
+func Detect(text string) bool {
+	for _, m := range markers {
+		if strings.Contains(text, m) {
+			return true
 		}
 	}
-	return "cookie"
+	return false
 }
 
-// ParseBlock parses an upload that may contain one account or many.
-func ParseBlock(text string) ([]*Cookie, []error) {
+// ParseCookies parses an upload that may contain one account or many.
+func ParseCookies(text string) ([]*Cookie, []error) {
 	text = strings.TrimPrefix(text, "\ufeff")
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -185,14 +158,12 @@ func parseNetscape(text string) (*Cookie, error) {
 func parseJSONCookie(text string) (*Cookie, error) {
 	values := map[string]string{}
 
-	// {"MSPAuth": "...", "MSPProf": "..."}
 	var flat map[string]string
 	if err := json.Unmarshal([]byte(text), &flat); err == nil && len(flat) > 0 {
 		for k, v := range flat {
 			values[k] = v
 		}
 	} else {
-		// [{"name":"MSPAuth","value":"..."}]
 		var arr []struct {
 			Name  string `json:"name"`
 			Value string `json:"value"`

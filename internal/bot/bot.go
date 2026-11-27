@@ -1,4 +1,4 @@
-// Package bot wires the Telegram interface around the checker.
+// Package bot wires the Telegram interface around the cookie checkers.
 package bot
 
 import (
@@ -11,6 +11,7 @@ import (
 	"github.com/GT56GT/hotmail-checker/internal/checker"
 	"github.com/GT56GT/hotmail-checker/internal/config"
 	"github.com/GT56GT/hotmail-checker/internal/job"
+	"github.com/GT56GT/hotmail-checker/internal/provider"
 	"github.com/GT56GT/hotmail-checker/internal/proxy"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
@@ -35,19 +36,20 @@ type pending struct {
 
 // Bot holds shared dependencies for every handler.
 type Bot struct {
-	cfg    *config.Config
-	chk    *checker.Checker
-	pools  *proxy.Manager
-	reg    *job.Registry
-	client *gotgbot.Bot
-	http   *http.Client
+	cfg      *config.Config
+	checkers []provider.Checker
+	ms       *checker.Checker // nil when the Microsoft provider is disabled
+	pools    *proxy.Manager
+	reg      *job.Registry
+	client   *gotgbot.Bot
+	http     *http.Client
 
 	mu      sync.Mutex
 	pending map[int64]pending
 }
 
 // New validates the token and builds the handler set.
-func New(cfg *config.Config, chk *checker.Checker, pools *proxy.Manager, reg *job.Registry) (*Bot, error) {
+func New(cfg *config.Config, checkers []provider.Checker, pools *proxy.Manager, reg *job.Registry) (*Bot, error) {
 	client, err := gotgbot.NewBot(cfg.BotToken, &gotgbot.BotOpts{
 		BotClient: &gotgbot.BaseBotClient{
 			Client: http.Client{Timeout: 60 * time.Second},
@@ -57,14 +59,22 @@ func New(cfg *config.Config, chk *checker.Checker, pools *proxy.Manager, reg *jo
 		return nil, err
 	}
 
+	var ms *checker.Checker
+	for _, c := range checkers {
+		if v, ok := c.(*checker.Checker); ok {
+			ms = v
+		}
+	}
+
 	return &Bot{
-		cfg:     cfg,
-		chk:     chk,
-		pools:   pools,
-		reg:     reg,
-		client:  client,
-		http:    &http.Client{Timeout: 60 * time.Second},
-		pending: make(map[int64]pending),
+		cfg:      cfg,
+		checkers: checkers,
+		ms:       ms,
+		pools:    pools,
+		reg:      reg,
+		client:   client,
+		http:     &http.Client{Timeout: 60 * time.Second},
+		pending:  make(map[int64]pending),
 	}, nil
 }
 
@@ -102,10 +112,18 @@ func (b *Bot) Run(ctx context.Context) error {
 		return err
 	}
 
-	slog.Info("polling", "bot", b.client.Username)
+	slog.Info("polling", "bot", b.client.Username, "providers", b.providerNames())
 
 	<-ctx.Done()
 	return updater.Stop()
+}
+
+func (b *Bot) providerNames() string {
+	names := make([]string, 0, len(b.checkers))
+	for _, c := range b.checkers {
+		names = append(names, c.Name())
+	}
+	return joinComma(names)
 }
 
 func isCookieMessage(m *gotgbot.Message) bool {

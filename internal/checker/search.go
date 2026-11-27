@@ -11,6 +11,8 @@ import (
 
 	fhttp "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
+
+	"github.com/GT56GT/hotmail-checker/internal/provider"
 )
 
 const (
@@ -27,22 +29,9 @@ const (
 	searchBodyLimit = 4 << 20
 )
 
-// SearchItem is one matching message.
-type SearchItem struct {
-	Subject string
-	From    string
-	Date    time.Time
-	Preview string
-	Link    string
-}
-
-// SearchOutcome is the result of searching one account.
-type SearchOutcome struct {
-	Items   []SearchItem
-	Method  string // graph | rest
-	Reason  string
-	Elapsed time.Duration
-}
+// SearchItem and SearchOutcome are shared with the report layer.
+type SearchItem = provider.SearchItem
+type SearchOutcome = provider.SearchOutcome
 
 // Search queries one account's mailbox for a keyword.
 //

@@ -3,6 +3,7 @@ package bot
 import (
 	"encoding/csv"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -21,13 +22,13 @@ type bundle struct {
 }
 
 // buildBundle renders the consolidated report plus machine-readable exports.
-// searches is index-aligned with hits (the first len(searches) entries).
-func buildBundle(hits []job.Hit, dead, challenged, errs []string, searches []searchOutcome, term string, j *job.Job) bundle {
+// searches is keyed by index in hits.
+func buildBundle(hits []job.Hit, dead, challenged, errs []string, searches map[int]searchOutcome, term string, j *job.Job) bundle {
 	var b bundle
 
 	var sb strings.Builder
 
-	sb.WriteString("# hotmail-checker results\n")
+	sb.WriteString("# cookie checker results\n")
 	fmt.Fprintf(&sb, "# job       %s\n", j.ID)
 	fmt.Fprintf(&sb, "# source    %s\n", orUnknown(j.Source))
 	fmt.Fprintf(&sb, "# finished  %s\n", time.Now().UTC().Format(time.RFC3339))
@@ -46,21 +47,29 @@ func buildBundle(hits []job.Hit, dead, challenged, errs []string, searches []sea
 	if len(hits) == 0 {
 		sb.WriteString("\nnone\n")
 	}
-	for i, h := range hits {
-		fmt.Fprintf(&sb, "\n### %d. %s\n", i+1, orUnknown(h.Email))
-		sb.WriteString("status : live\n")
-		fmt.Fprintf(&sb, "name   : %s\n", orDash(h.Name))
-		fmt.Fprintf(&sb, "proxy  : %s\n", orDash(h.Proxy))
 
-		if i < len(searches) {
-			s := searches[i]
+	for i, h := range hits {
+		fmt.Fprintf(&sb, "\n### %d. %s\n", i+1, orUnknown(firstNonEmpty(h.Email, h.Name)))
+		fmt.Fprintf(&sb, "service : %s\n", displayName(h.Provider))
+		sb.WriteString("status  : live\n")
+
+		for _, k := range sortedKeys(h.Meta) {
+			if strings.TrimSpace(h.Meta[k]) == "" {
+				continue
+			}
+			fmt.Fprintf(&sb, "%s : %s\n", padKey(k), h.Meta[k])
+		}
+
+		fmt.Fprintf(&sb, "proxy   : %s\n", orDash(h.Proxy))
+
+		if s, ok := searches[i]; ok {
 			switch {
 			case len(s.Items) > 0:
-				fmt.Fprintf(&sb, "search : %d match(es) for %q via %s\n", len(s.Items), term, s.Method)
+				fmt.Fprintf(&sb, "search  : %d match(es) for %q via %s\n", len(s.Items), term, s.Method)
 			case s.Reason != "":
-				fmt.Fprintf(&sb, "search : %s\n", s.Reason)
+				fmt.Fprintf(&sb, "search  : %s\n", s.Reason)
 			default:
-				fmt.Fprintf(&sb, "search : no matches for %q\n", term)
+				fmt.Fprintf(&sb, "search  : no matches for %q\n", term)
 			}
 
 			for _, m := range s.Items {
@@ -81,7 +90,7 @@ func buildBundle(hits []job.Hit, dead, challenged, errs []string, searches []sea
 
 	// --- CHALLENGED -------------------------------------------------------
 	if len(challenged) > 0 {
-		sb.WriteString("\n## CHALLENGED — session valid, needs consent or re-auth\n")
+		sb.WriteString("\n## CHALLENGED — valid session, needs consent or re-auth\n")
 		for _, c := range challenged {
 			fmt.Fprintf(&sb, "- %s\n", c)
 		}
@@ -124,18 +133,22 @@ func buildBundle(hits []job.Hit, dead, challenged, errs []string, searches []sea
 	// --- accounts.csv -----------------------------------------------------
 	var acct strings.Builder
 	aw := csv.NewWriter(&acct)
-	_ = aw.Write([]string{"email", "name", "status", "proxy", "search_matches"})
+	_ = aw.Write([]string{"provider", "email", "name", "status", "plan", "country", "proxy", "search_matches"})
 	for i, h := range hits {
 		matches := 0
-		if i < len(searches) {
-			matches = len(searches[i].Items)
+		if s, ok := searches[i]; ok {
+			matches = len(s.Items)
 		}
 		_ = aw.Write([]string{
-			h.Email, h.Name, "live", h.Proxy, strconv.Itoa(matches),
+			h.Provider,
+			h.Email,
+			h.Name,
+			"live",
+			h.Meta["Plan"],
+			h.Meta["Country"],
+			h.Proxy,
+			strconv.Itoa(matches),
 		})
-	}
-	for range challenged {
-		_ = aw.Write([]string{"", "", "challenged", "", "0"})
 	}
 	aw.Flush()
 	b.accounts = acct.String()
@@ -144,7 +157,13 @@ func buildBundle(hits []job.Hit, dead, challenged, errs []string, searches []sea
 	var srch strings.Builder
 	sw := csv.NewWriter(&srch)
 	_ = sw.Write([]string{"email", "date", "from", "subject", "link"})
-	for _, s := range searches {
+	keys := make([]int, 0, len(searches))
+	for k := range searches {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	for _, k := range keys {
+		s := searches[k]
 		for _, m := range s.Items {
 			date := ""
 			if !m.Date.IsZero() {
@@ -179,4 +198,30 @@ func zipBundle(b bundle, term string) ([]byte, error) {
 		files = append(files, archive.File{Name: "search.csv", Data: []byte(b.search)})
 	}
 	return archive.Build(files)
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// padKey aligns Meta lines in the report.
+func padKey(k string) string {
+	for len(k) < 7 {
+		k += " "
+	}
+	return k
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
