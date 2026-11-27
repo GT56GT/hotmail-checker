@@ -79,7 +79,7 @@ echo "==> Pushing $BRANCH -> heroku/main"
 git push heroku "$BRANCH:main"
 
 echo "==> Scale"
-heroku ps:scale worker=1 web=0 -a "$APP"
+heroku ps:scale worker=1 -a "$APP"
 
 echo "==> Waiting for first boot"
 sleep 12

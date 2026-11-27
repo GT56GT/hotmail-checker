@@ -31,6 +31,18 @@ heroku run --type=worker bin/hotmail-checker -selftest -a <app>
 
 Expected: `verdict: dead` and `OK — TLS impersonation works and the endpoint answered.`
 
+### Worker-only app
+
+There is no `web` process — the bot polls Telegram, it does not serve HTTP. Scale the worker, never web:
+
+```bash
+heroku ps:scale worker=1 -a <app>
+```
+
+From the dashboard: **Resources → worker → toggle on**.
+
+If a deploy stops at *"Error scaling dynos: Couldn't find that process type (web)"*, that is an older `app.json` declaring a web dyno that does not exist. Pull the latest and redeploy — or just toggle the worker on manually, which is the only step that was missing.
+
 ## Why this one works
 
 `outlook.live.com/mail/0/inbox` returns **HTTP 200 with a login page to everyone**. A status-code checker calls every cookie live.

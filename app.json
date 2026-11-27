@@ -8,8 +8,7 @@
     { "url": "heroku/go" }
   ],
   "formation": {
-    "worker": { "quantity": 1, "size": "eco" },
-    "web": { "quantity": 0 }
+    "worker": { "quantity": 1, "size": "eco" }
   },
   "env": {
     "BOT_TOKEN": {

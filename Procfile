@@ -1,1 +1,1 @@
-worker: bin/hotmail-checker
+worker: bash run.sh
