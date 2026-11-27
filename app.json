@@ -1,0 +1,47 @@
+{
+  "name": "hotmail-checker",
+  "description": "Hotmail cookie validator - Telegram bot",
+  "repository": "https://github.com/GT56GT/hotmail-checker",
+  "logo": "",
+  "keywords": ["telegram", "bot", "checker", "python", "asyncio"],
+  "stack": "heroku-24",
+  "buildpacks": [
+    { "url": "heroku/python" }
+  ],
+  "addons": [
+    { "plan": "heroku-postgresql:essential-0" }
+  ],
+  "formation": {
+    "worker": { "quantity": 1, "size": "basic" },
+    "web": { "quantity": 0 }
+  },
+  "env": {
+    "BOT_TOKEN": {
+      "description": "Telegram bot token from @BotFather",
+      "required": true
+    },
+    "ADMIN_IDS": {
+      "description": "Comma-separated Telegram numeric IDs with admin access",
+      "required": true
+    },
+    "PROXY_LIST_URL": {
+      "description": "Optional remote proxy list URL",
+      "required": false
+    },
+    "CHECK_CONCURRENCY": {
+      "description": "Concurrent checks per worker",
+      "value": "10",
+      "required": false
+    },
+    "DEFAULT_CREDITS": {
+      "description": "Credits granted on signup",
+      "value": "10",
+      "required": false
+    },
+    "LOG_LEVEL": {
+      "description": "Logging verbosity",
+      "value": "INFO",
+      "required": false
+    }
+  }
+}
